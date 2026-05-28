@@ -1,0 +1,7 @@
+{
+  "id": "activewiki",
+  "onStartup": true,
+  "description": "Vector search + knowledge graph over a configurable wiki corpus (ActiveWiki)",
+  "configSchema": {},
+  "main": "./index.ts"
+}

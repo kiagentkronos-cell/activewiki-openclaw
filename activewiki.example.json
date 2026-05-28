@@ -1,0 +1,57 @@
+{
+  "_comment": "ActiveWiki configuration — copy to activewiki.json and adjust paths",
+
+  "wikis_root": "/path/to/your/wikis",
+  "_wikis_comment": "Root directory containing: inbox/, sources/, wiki/, vectordb/, logs/, scripts/",
+
+  "scopes": {
+    "enabled": ["private", "family", "public"],
+    "scopes_config": "/path/to/scopes.json",
+    "_scopes_comment": "Path to scopes.json (sessionKey → allowed scopes mapping). See scopes.json.example."
+  },
+
+  "embeddings": {
+    "backend": "ollama",
+    "model": "bge-m3",
+    "ollama_url": "http://localhost:11434",
+    "embed_dim": 1024,
+    "chunk_size": 400,
+    "chunk_overlap": 50,
+    "index_path": "vectordb/index.sqlite",
+    "_comment": "index_path is relative to wikis_root. Default: vectordb/index.sqlite"
+  },
+
+  "ocr": {
+    "engine": "docling",
+    "venv_path": "/path/to/docling_venv",
+    "_comment": "Python venv with docling installed. Leave empty to use system python3."
+  },
+
+  "llm": {
+    "backend": "ollama",
+    "model": "qwen3.6-fp8-fast",
+    "ollama_url": "http://localhost:11434",
+    "url": "http://127.0.0.1:8000/v1",
+    "temperature": 0.5,
+    "max_tokens": 4096,
+    "_comment": "LLM for distillation (wiki page generation from raw documents). 'url' is the OpenAI-compatible endpoint."
+  },
+
+  "graph": {
+    "build_incremental": true,
+    "communities_enabled": true,
+    "communities_incremental_threshold": 5,
+    "_comment": "KG: incremental saves time on daily runs. Communities rebuild only when >threshold new entities."
+  },
+
+  "distill": {
+    "rollup_all": true,
+    "_comment": "After distilling all new sources: bottom-up rollup of wiki hierarchy?"
+  },
+
+  "ingest": {
+    "deadline": "03:00",
+    "timezone": "Europe/Berlin",
+    "_comment": "Hard deadline in local time. Distillation stops here; vector/graph build continues."
+  }
+}
