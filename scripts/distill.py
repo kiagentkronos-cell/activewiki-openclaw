@@ -1163,9 +1163,44 @@ def call_llm(
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                "temperature": 0.2,
+                "temperature": llm_temperature(_CONFIG),
                 "max_tokens": 65536,
-                "response_format": {"type": "json_object"},
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "wiki_response",
+                        "strict": False,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["create", "update"]},
+                                "slug": {"type": "string"},
+                                "title": {"type": "string"},
+                                "summary": {"type": "string"},
+                                "topics": {"type": "array", "items": {"type": "string"}},
+                                "content_md": {"type": "string"},
+                                "actions": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "type": {"type": "string"},
+                                            "slug": {"type": "string"},
+                                            "title": {"type": "string"},
+                                            "summary": {"type": "string"},
+                                            "topics": {"type": "array", "items": {"type": "string"}},
+                                            "content_md": {"type": "string"},
+                                            "related_slugs": {"type": "array", "items": {"type": "string"}}
+                                        },
+                                        "additionalProperties": True
+                                    }
+                                },
+                                "_rollup_slug_": {"type": ["string", "null"]}
+                            },
+                            "additionalProperties": True
+                        }
+                    }
+                },
                 "chat_template_kwargs": {"enable_thinking": False},
             }
             req = urllib.request.Request(

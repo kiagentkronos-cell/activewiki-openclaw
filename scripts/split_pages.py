@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (
     load_config,
     wikis_root, scopes,
-    llm_model, llm_url,
+    llm_model, llm_url, llm_temperature,
 )
 
 _CONFIG = load_config()
@@ -277,9 +277,35 @@ def call_llm(system: str, user: str, *, source_id: str | None = None) -> dict[st
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                "temperature": 0.2,
+                "temperature": llm_temperature(_CONFIG),
                 "max_tokens": 32768,
-                "response_format": {"type": "json_object"},
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "split_response",
+                        "strict": False,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "pages": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "slug": {"type": ["string", "null"]},
+                                            "title": {"type": "string"},
+                                            "summary": {"type": "string"},
+                                            "topics": {"type": "array", "items": {"type": "string"}},
+                                            "content_md": {"type": "string"}
+                                        },
+                                        "additionalProperties": True
+                                    }
+                                }
+                            },
+                            "additionalProperties": True
+                        }
+                    }
+                },
                 "chat_template_kwargs": {"enable_thinking": False},
             }
             req = urllib.request.Request(
