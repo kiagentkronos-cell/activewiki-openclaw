@@ -137,6 +137,44 @@ FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
 H2_SPLIT_RE = re.compile(r"(?=^##\s)", re.MULTILINE)
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
+# JSON-Schema für Community-Summary (vermeidet vLLM json_object Bugs)
+_SCHEMA_COMMUNITY_SUMMARY = {
+    'type': 'json_schema',
+    'json_schema': {
+        'name': 'community_summary',
+        'strict': False,
+        'schema': {
+            'type': 'object',
+            'properties': {
+                'label': {'type': 'string'},
+                'summary': {'type': 'string'},
+            },
+            'required': ['label', 'summary'],
+            'additionalProperties': False,
+        },
+    },
+}
+
+# ── Graph Exclude Filter ──
+# Comma-separated prefix patterns; matching wiki_pages are skipped for KG extraction.
+# Vector-DB indexing and distillation remain unaffected.
+GRAPH_EXCLUDE_PATTERNS = [
+    p for p in os.environ.get("ACTIVEWIKI_GRAPH_EXCLUDE", "public/spass-").split(",")
+    if p.strip()
+]
+
+
+def _should_exclude_from_graph(wiki_page: str) -> bool:
+    """Check whether *wiki_page* (format "scope/slug") should be excluded from Knowledge-Graph entity extraction.
+
+    Matches any prefix in :data:`GRAPH_EXCLUDE_PATTERNS`. Returns ``True`` when the page must be skipped.
+    """
+    for pattern in GRAPH_EXCLUDE_PATTERNS:
+        if wiki_page.startswith(pattern):
+            return True
+    return False
+
+
 # ── Entity / Relationship type lists ──
 ENTITY_TYPES = [
     "PERSON", "ORGANIZATION", "LOCATION", "DOCUMENT", "PROPERTY",
@@ -1426,8 +1464,9 @@ def _ollama_extract(text: str, known_entities_text: str | None = None) -> Dict[s
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Extrahiere Entities und Beziehungen aus:\n\n{text}"},
         ],
-        "temperature": 0.3,
+        "temperature": llm_temperature(_CONFIG),
         "max_tokens": 8192,
+        "thinking": "off",  # vLLM: prevents » thinking tags in JSON output
     }
 
     last_err: Optional[Exception] = None
@@ -1440,7 +1479,10 @@ def _ollama_extract(text: str, known_entities_text: str | None = None) -> Dict[s
                 headers={"Content-Type": "application/json"},
             )
             with urllib.request.urlopen(req, timeout=3600) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
+                raw_bytes = resp.read()
+                if not raw_bytes:
+                    raise ValueError("vLLM returned 200 OK with empty body")
+                body = json.loads(raw_bytes.decode("utf-8"))
             msg = body["choices"][0]["message"]
             raw = (msg.get("content") or msg.get("reasoning") or "").strip()
 
@@ -1564,6 +1606,12 @@ def process_page(
     scope = filepath.parts[-2]
     if wiki_page is None:
         wiki_page = f"{scope}/{slug}"
+
+    # Exclude filter — skip KG extraction for matched pages
+    if _should_exclude_from_graph(wiki_page):
+        log("graph-exclude", f" Skipping {wiki_page} (excluded from graph)")
+        return 0, 0
+
     full_text = filepath.read_text(encoding="utf-8")
 
     fm, body = strip_frontmatter(full_text)
@@ -1766,6 +1814,18 @@ def update_graph_incremental() -> None:
     total_relations_removed = 0
 
     for i, (p, wiki_page, body_hash) in enumerate(changed, 1):
+        # Exclude filter — skip KG extraction for matched pages
+        if _should_exclude_from_graph(wiki_page):
+            log("graph-incr", f"Skipping {wiki_page} (excluded from graph)")
+            # Still record state so we don't re-check next run
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_page_state(wiki_page, body_hash, processed_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (wiki_page, body_hash),
+            )
+            conn.commit()
+            continue
+
         log("graph-incr", f"[{i}/{len(changed)}] Processing {wiki_page}")
 
         # Atomic transaction: cleanup → LLM extraction → state update.
@@ -1989,8 +2049,10 @@ Erstelle Label und Summary als JSON."""
             {"role": "system", "content": COMMUNITY_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": 0.1,
-        "max_tokens": 512,
+        "temperature": llm_temperature(_CONFIG),
+        "max_tokens": 2048,
+        "response_format": _SCHEMA_COMMUNITY_SUMMARY,
+        "chat_template_kwargs": {"enable_thinking": False},  # vLLM: prevents thinking tags in JSON output
     }
 
     last_err: Optional[Exception] = None
@@ -2001,8 +2063,11 @@ Erstelle Label und Summary als JSON."""
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
             )
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
+            with urllib.request.urlopen(req, timeout=3600) as resp:
+                raw_bytes = resp.read()
+                if not raw_bytes:
+                    raise ValueError("vLLM returned 200 OK with empty body")
+                body = json.loads(raw_bytes.decode("utf-8"))
             msg = body["choices"][0]["message"]
             # qwen3.6 schiebt Output manchmal ins "reasoning"-Field statt "content"
             raw = msg.get("content") or msg.get("reasoning") or ""
