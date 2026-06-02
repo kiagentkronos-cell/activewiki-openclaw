@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import { resolve, join } from "node:path";
 import type { VectorSearchResult } from "./types.js";
@@ -36,7 +37,6 @@ function resolveWikisRoot(): string {
   const configPath = process.env.ACTIVEWIKI_CONFIG;
   if (configPath) {
     try {
-      const { readFileSync } = require("node:fs");
       const cfg = JSON.parse(readFileSync(configPath, "utf-8"));
       const raw = cfg.wikis_root;
       if (raw) return resolve(raw);
@@ -74,7 +74,6 @@ const ALLOWED_ENV_KEYS = new Set([
   "ACTIVEWIKI_DB_PATH",
   "ACTIVEWIKI_CONFIG",
   "ACTIVEWIKI_EMBEDDING_MODEL",
-  "ACTIVEWIKI_CONFIG",
   "ACTIVEWIKI_WIKIS_ROOT",
   "ACTIVEWIKI_PYTHON_BIN",
   "ACTIVEWIKI_OCR_VENV",

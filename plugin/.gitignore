@@ -1,0 +1,14 @@
+# Dependencies and build artifacts only — Source stays tracked for GitHub repo!
+node_modules/
+
+# Build output (npm publish uses .npmignore instead)
+dist/
+
+# Packaged tarsballs
+*.tgz
+
+# OS / editor artifacts
+.DS_Store
+
+.env*
+*-debug.log

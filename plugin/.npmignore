@@ -1,0 +1,11 @@
+# Source
+*.ts
+!*.d.ts
+tsconfig.json
+lib/
+
+# Dev
+node_modules/
+knowledge-graph.md
+
+# Local config examples (ship separately or in docs)

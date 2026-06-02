@@ -13,10 +13,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "paths": {
-      "openclaw/*": ["/home/user/.npm-global/lib/node_modules/openclaw/dist/*"]
-    }
+    "resolveJsonModule": true
   },
   "include": ["index.ts", "lib/**/*.ts"],
   "exclude": ["dist", "node_modules"]

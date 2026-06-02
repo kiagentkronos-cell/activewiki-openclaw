@@ -1,0 +1,28 @@
+# Lokale Configs mit sensiblen Daten — niemals committen!
+scopes.json
+activewiki.json
+
+# Build-Artefakte
+__pycache__/
+*.pyc
+
+# Logs
+logs/
+trash/
+*.bak-
+
+# Venvs
+venv/
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Review-Dokumente (intern)
+claudereview.md
+clauderückmeldung.md
+trash/

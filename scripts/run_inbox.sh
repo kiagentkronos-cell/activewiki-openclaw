@@ -137,7 +137,6 @@ if past_deadline; then
 fi
 
 echo "[$(stamp)] vectordb start (build + graph + communities)" >>"$LOG"
-export WIKIS_LOG_REDIRECT=1
 
 GRAPH_FLAG="--graph-incremental"
 

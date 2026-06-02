@@ -74,7 +74,7 @@ export interface WikiPageResult {
  * Searches both `wiki/<scope>/` and `sources/<scope>/` subdirectories.
  * Validates slug against a strict regex and protects against path traversal.
  *
- * @param scope - One of "private" | "family" | "public" | "youtube"
+ * @param scope - One of "private" | "family" | "public"
  * @param slug - URL-safe identifier (lowercase, hyphens, digits)
  * @param fromLine - 1-based starting line
  * @param lineCount - Maximum number of lines to return

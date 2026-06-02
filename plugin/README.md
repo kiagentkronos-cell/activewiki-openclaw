@@ -1,6 +1,6 @@
 # ActiveWiki — OpenClaw Wiki Integration
 
-**Status:** Entwicklung | **Letzte Änderung:** 2026-05-23 | **Autor:** Kronos
+**Status:** Stabil/Release | **Letzte Änderung:** 2026-05-30 | **Autor:** Max Mustermann
 
 ---
 
@@ -126,214 +126,42 @@ activewiki/
 
 ## 3. Konfiguration
 
-### aktivewiki.json
+### activewiki.json
 
-Kopiere `activewiki.example.json` nach `activewiki.json` und passe an:
+Kopiere `activewiki.example.json` nach `activewiki.json` und passe an.
 
-```json
-{
-  "wikis_root": "/path/to/your/wikis",
-  "embeddings": {
-    "model": "bge-m3",
-    "ollama_url": "http://localhost:11434"
-  },
-  "llm": {
-    "model": "qwen3.6-fp8",
-    "url": "http://127.0.0.1:8000/v1"
-  },
-  "scopes": {
-    "scopes_config": "/path/to/scopes.json"
-  }
-}
-```
+**Alle konfigurierbaren Optionen:**
 
-Vollständige Config-Referenz in `activewiki.example.json`.
+| Option | Typ | Standardwert | Beschreibung |
+|--------|-----|-------------|--------------|
+| `wikis_root` | string | _required_ | Root-Verzeichnis mit inbox/, sources/, wiki/, vectordb/ |
+| `scopes.enabled` | string[] | [private,family,public] | Aktivierte Scopes |
+| `scopes.scopes_config` | string | _required_ | Pfad zu scopes.json (Scope-Gating) |
+| `embeddings.backend` | string | ollama | Embedding-Backend (derzeit nur Ollama) |
+| `embeddings.model` | string | bge-m3 | Embedding-Modell (auch nomic-embed-text) |
+| `embeddings.ollama_url` | string | http://localhost:11434 | Ollama-API fuer Embeddings |
+| `embeddings.embed_dim` | int | 1024 | Dimensionen (bge-m3=1024, nomic=768) |
+| `embeddings.chunk_size` | int | 400 | Chunk-Groesse in Zeichen |
+| `embeddings.chunk_overlap` | int | 50 | Overlap zwischen Chunks |
+| `embeddings.index_path` | string | vectordb/index.sqlite | SQLite-Pfad relativ zu wikis_root |
+| `ocr.engine` | string | docling | OCR-Engine fuer PDF/Bilder |
+| `ocr.venv_path` | string | _optional_ | Python Venv mit Docling |
+| `llm.backend` | string | ollama | LLM-Backend fuer Distillation |
+| `llm.model` | string | _required_ | LLM-Modell-Name |
+| `llm.ollama_url` | string | http://localhost:11434 | Ollama-API fuer LLM |
+| `llm.url` | string | http://127.0.0.1:8000/v1 | OpenAI-kompatibler Endpoint (vLLM) |
 
-### scopes.json
+**`llm.temperature`** (float, default `0.5`) — **Wichtig:** Von allen Scripts (`vectordb.py`, `distill.py`, `split_pages.py`) zentral ueber Config verwendet — nicht mehr hardcoded!
 
-Definiert wer welche Scopes sehen darf:
+**`llm.max_tokens`** (int, default `4096`) — Max Tokens pro Antwort
 
-```json
-{
-  "entries": [
-    {
-      "name": "admin",
-      "scopes": ["private", "family", "public"],
-      "sessionKeyPatterns [": [":discord:", ":whatsapp:direct:+49..."]
-    }
-  ],
-  "default": { "scopes": ["public"] }
-}
-```
+| Option | Typ | Standardwert | Beschreibung |
+|--------|-----|-------------|--------------|
+| `graph.build_incremental` | bool | true | KG incremental build |
+| `graph.communities_enabled` | bool | true | Community Detection (igraph) |
+| `graph.communities_incremental_threshold` | int | 5 | Neubuild wenn mehr neue Entities |
+| `distill.rollup_all` | bool | true | Bottom-up Rollup der Wiki-Hierarchie |
+| `ingest.deadline` | string | "03:00" | Pipeline stoppt zu dieser Zeit |
+| `ingest.timezone` | string | "Europe/Berlin" | Zeitzone fuer Deadline |
 
-**Wichtig:** Wird bei jeder Suche neu gelesen — keine Neustart nötig.
-
-### Umgebungsvariablen
-
-| Variable | Zweck |
-|----------|-------|
-| `ACTIVEWIKI_CONFIG` | Pfad zu `activewiki.json` |
-| `ACTIVEWIKI_WIKIS_ROOT` | Override für `wikis_root` |
-| `ACTIVEWIKI_SCOPES_CONFIG` | Override für `scopes.json` Pfad |
-| `ACTIVEWIKI_PYTHON_BIN` | Python-Binary für Plugin |
-| `ACTIVEWIKI_OCR_VENV` | Docling Venv-Pfad |
-
----
-
-## 4. Installation
-
-### Vorbereitungen
-
-1. **Ollama** mit Embedding-Modell (`bge-m3` oder ähnlich)
-2. **LLM-Backend** für Distillation (vLLM, Ollama, OpenAI-compatible)
-3. **Docling** (für OCR) — Venv empfohlen
-4. **OpenClaw** mit Plugin-Unterstützung
-
-### Plugin Installieren
-
-```bash
-# TypeScript compilieren
-cd plugin/
-npm install
-npm run build
-
-# Plugin installieren (symbolischer Link)
-openclaw plugins install --link /path/to/activewiki/plugin
-
-# Config-Umgebungsvariablen setzen (z.B. in ~/.bashrc oder systemd Unit)
-export ACTIVEWIKI_CONFIG="/path/to/activewiki/activewiki.json"
-export ACTIVEWIKI_WIKIS_ROOT="/path/to/your/wikis"
-
-# Gateway neu starten
-systemctl --user restart openclaw-gateway.service
-```
-
-### Wikis-Verzeichnis anlegen
-
-```bash
-mkdir -p $WIKIS_ROOT/{inbox/{private,family,public},sources/{private,family,public},wiki/{private,family,public},vectordb,logs}
-```
-
-### Schnelltest
-
-```bash
-cd plugin/
-node --input-type=module -e '
-  import { searchWiki } from "./dist/lib/cli-wrapper.js";
-  const r = await searchWiki("Testfrage?", ["public"], 6);
-  console.log(JSON.stringify(r, null, 2));
-'
-```
-
----
-
-## 5. Pipeline: Von Dokument zu Active Memory
-
-### Der vollständige Workflow
-
-```
-inbox/<scope>/document.pdf
-         ↓
-   [INGEST]  ingest.py → OCR (Docling) → sources/<scope>/xxx/docling.md
-         ↓
-   [DISTILL] distill.py → LLM-Extraktion → wiki/<scope>/xxx.md
-         ↓
-   [VECTOR]  vectordb.py → Chunking + Embedding → index.sqlite
-         ↓
-   [GRAPH]   vectordb.py graph build → Entities + Relationships
-         ↓
-   [PLUGIN]  aktivewiki plugin → memory_search → <active_memory_plugin>
-```
-
-### Phase 1: Ingest
-
-`scripts/ingest.py` verarbeitet Dateien aus `inbox/<scope>/`:
-- Docling konvertiert PDF/Bilder/DOCX zu Markdown
-- Content-Hash verhindert Duplikate
-- Scope wird aus dem Ordner abgeleitet
-
-**Gesteuert von:** `run_inbox.sh` (automatisch) oder manuell
-
-### Phase 2: Distillation
-
-`scripts/distill.py` generiert Wiki-Seiten:
-- Docling-Output wird vom LLM strukturiert extrahiert
-- Ordnerhierarchie → Wiki-Hierarchie
-- Bottom-up Rollup: Parent-Seiten synthetisieren Child-Inhalte
-
-**LLM-Anforderung:** Mindestens 7B Parameter, 32K+ Context. Empfohlen: qwen3.6-fp8 oder ähnliches.
-
-### Phase 3: Vektordatenbank
-
-`scripts/vectordb.py` baut die Such-Indizes:
-- Wiki-Seiten werden in Chunks zerlegt
-- Ollama-Embeddings (bge-m3)
-- Incremental: nur geänderte/neue Seiten werden eingebettet
-
-### Phase 4: Knowledge Graph
-
-`scripts/vectordb.py graph build`:
-- LLM extrahiert Entities (Personen, Orte, Organisationen) und deren Beziehungen
-- Entities werden zu Graph-Knoten, Beziehungen zu Kanten
-- Community Detection (igraph, optional)
-
-### Phase 5: Active Memory Integration
-
-Das TypeScript-Plugin macht alles verfügbar:
-- Bei jeder `memory_search`-Query durchsucht das Plugin die Vektordatenbank
-- Vektor→Graph-Bridge verbindet semantische Suche mit Beziehungsnetzwerk
-- Scope-Gating stellt sicher, dass Nutzer nur erlaubte Daten sehen
-
----
-
-## 6. Operationale Hinweise
-
-### Täglicher Cron
-
-`run_inbox.sh` sollte als Cron-Job laufen (empfohlen: nachts):
-- Neue Dokumente in `inbox/` werden verarbeitet
-- Vektordatenbank wird incremental aktualisiert
-- Knowledge Graph wird neu gebaut (incremental)
-
-### Wartung
-
-**Scopes aktualisieren:**
-`scopes.json` editieren — keine Neustart nötig
-
-**KG-Quota ändern:**
-`plugin/lib/cli-wrapper.ts` → Divisor in `Math.floor(maxResults / 3)` → `npm run build` → restart
-
-**Status prüfen:**
-```bash
-openclaw plugins list | grep activewiki
-systemctl --user is-active openclaw-gateway.service
-```
-
-### Troubleshooting
-
-**Keine Wiki-Treffer obwohl Inhalt existiert?**
-1. Gateway-Logs: `journalctl --user -u openclaw-gateway -n 50 | grep activewiki`
-2. Scopes prüfen: `$PYTHON scripts/vectordb.py search --json -k 3 --scopes public "Test"`
-3. Plugin aktiv? `openclaw plugins list | grep activewiki`
-
-**Stille Fehlschläge:**
-Das Plugin degradiert überall graceful (`return []` bei Vektor-Fehler, `return []` bei Graph-Fehler). Wenn alles schiefgeht, erscheinen einfach keine Wiki-Treffer. Das ist gewollt (crasht nicht), macht aber Debugging ohne Logs schwierig.
-
----
-
-## 7. FAQ
-
-**Warum eine Bridge statt direkt `graph search`?**
-`graph search` macht nur `SQL LIKE %query%` gegen Entity-Labels. Das trifft natürlichsprachige Queries fast nie. Die Bridge nutzt Vektorsuche um relevante Seiten zu finden, dann holt der Graph die Beziehungen dieser Seiten.
-
-**Wie viel RAM braucht die Vektordatenbank?**
-Abhängig von der Chunk-Anzahl. ~10.000 Chunks → ~40MB RAM für Embeddings. ~50.000 → ~200MB. Keine Index-Struktur nötig (brute-force cosine similarity auf numpy arrays).
-
-**Kann ich mehrere Wikis betreiben?**
-Ja — jedes `wikis_root` ist isoliert. Du brauchst separate `activewiki.json` Instanzen.
-
-**Was passiert bei OpenClaw-Updates?**
-`MemoryCorpusSupplement` API könnte sich ändern. Nach jedem OpenClaw-Update prüfen:
-1. `openclaw plugins list` → Plugin aktiv?
-2. Logs → keine Ladefehler?
-3. Funktionstest → Wiki-Frage stellen → Treffer?
+Vollstaendige Vorlage mit allen Optionen und Kommentaren: `activewiki.example.json`.
