@@ -1,103 +1,103 @@
-# Wikis: Vektorsuche + Knowledge Graph in Active Memory
+# Wikis: Vector Search + Knowledge Graph in Active Memory
 
-Begleitdoku zu `SKILL.md`. Erklärt, **wie** die Wiki-Treffer in den `<active_memory_plugin>`-Block kommen und wie der Knowledge Graph daran hängt. Stand: 2026-05-22.
+Companion documentation for `SKILL.md`. Explains **how** wiki hits end up in the `<active_memory_plugin>` block and how the knowledge graph ties in. Status: 2026-05-22.
 
-## Das große Bild
+## The Big Picture
 
-Wenn ich antworte, baut der **active-memory**-Plugin von OpenClaw einen Erinnerungs-Kontext zusammen. Neben meinen eigenen Erinnerungen (`memory/`) fragt er **automatisch alle registrierten Memory-Corpus-Supplements** ab. Eines davon ist mein eigenes Plugin **`activewiki`** — es durchsucht die Wiki-Vektordatenbank UND den Knowledge Graph und liefert die Treffer scope-gegated zurück.
+When I respond, OpenClaw's **active-memory** plugin assembles a memory context. Alongside my own memories (`memory/`), it **automatically queries all registered memory corpus supplements**. One of them is my own plugin **`activewiki`** — it searches the wiki vector database AND the knowledge graph and returns scope-gated results.
 
-> **Wichtig:** Es gibt **keinen Schalter in der active-memory-Config** dafür. Das Supplement meldet sich beim Start selbst an (`registerMemoryCorpusSupplement`), und active-memory konsumiert es automatisch. Wer „im active memory einstellen will, dass auch das Wiki durchsucht wird", sucht an der falschen Stelle — die ganze Logik sitzt im Plugin, nicht in der Config.
+> **Important:** There is **no switch in the active-memory config** for this. The supplement registers itself at startup (`registerMemoryCorpusSupplement`), and active-memory consumes it automatically. If you're looking for where to "enable wiki search in active memory config", you're looking in the wrong place — all the logic lives in the plugin, not in config.
 
 ```
-Frage → active-memory → activewiki (Supplement)
+Question → active-memory → activewiki (supplement)
                               │
-                              ├─ vectordb.py search   (Vektor-Chunks, configured model)
-                              └─ vectordb.py graph pages (KG-Entities + Beziehungen)
-                              → gemergt, scope-gegated → <active_memory_plugin>-Block
+                              ├─ vectordb.py search   (vector chunks, configured model)
+                              └─ vectordb.py graph pages (KG entities + relationships)
+                              → merged, scope-gated → <active_memory_plugin> block
 ```
 
-## Wo das Plugin liegt
+## Where the Plugin Lives
 
 ```
-plugin//
-├── index.ts              ← Supplement-Registrierung (search + get), Scope-Gating
-├── lib/cli-wrapper.ts    ← ruft vectordb.py (Vektor + Graph), merged, KG-Quota
-├── lib/scope-resolver.ts ← resolveScopes(sessionKey) → erlaubte Scopes
-├── lib/wiki-reader.ts    ← get(): einzelne Wiki-Seite lesen
-└── dist/                 ← KOMPILIERT — das ist der echte Entry, NICHT index.ts
+plugin/
+├── index.ts              ← Supplement registration (search + get), scope gating
+├── lib/cli-wrapper.ts    ← calls vectordb.py (vector + graph), merges, KG quota
+├── lib/scope-resolver.ts ← resolveScopes(sessionKey) → allowed scopes
+├── lib/wiki-reader.ts    ← get(): read single wiki page
+└── dist/                 ← COMPILED — this is the real entry, NOT index.ts
 ```
 
-Geladen über `plugins.load.paths` in `openclaw.json`; in `plugins.entries` als `activewiki: { enabled: true }`.
+Loaded via `plugins.load.paths` in `openclaw.json`; enabled in `plugins.entries` as `activewiki: { enabled: true }`.
 
-## Die hybride Suche — Vektor→Graph-Bridge
+## The Hybrid Search — Vector→Graph Bridge
 
-`graph search` von vectordb.py macht nur `SQL LIKE %query%` gegen Entity-Labels. Das trifft eine **natürlichsprachige Mehrwort-Query fast nie** (`"Mein-Begriff"` trifft, `"Testfrage?"` liefert `[]`). Deshalb hängt der KG **nicht** direkt an der Roh-Query, sondern an einer Bridge:
+`graph search` in vectordb.py only does `SQL LIKE %query%` against entity labels. This almost never matches a **natural-language multi-word query** (`"My-Concept"` matches, `"Test question?"` returns `[]`). So the KG is **not** directly attached to the raw query, but to a bridge:
 
-1. **Vektorsuche** (überfetcht, `k = clamp(maxResults*3, 12, 30)`) findet die semantisch relevantesten Wiki-Seiten.
-2. Aus den Top-Treffern (`kind == "wiki"`) wird die `wiki_page = "<scope>/<ref>"` abgeleitet (verlustfrei — jede Entity-Seite entspricht genau einer Chunk-Seite).
-3. **`vectordb.py graph pages`** holt die Entities **dieser Seiten** + ihre 1-Hop-Beziehungen.
-4. **Merge mit KG-Quota:** ~⅓ der Plätze (`floor(maxResults/3)`) sind für KG-Treffer reserviert. Sonst würden die höher-scorenden Vektor-Chunks (0.5+) die KG-Entities (Fixscore 0.45) beim Slice komplett verdrängen. Nur Entities **mit** Beziehungen kommen durch (beziehungslose sind nur Seiten-Platzhalter).
+1. **Vector search** (over-fetching, `k = clamp(maxResults*3, 12, 30)`) finds the most semantically relevant wiki pages.
+2. From top hits (`kind == "wiki"`), derive `wiki_page = "<scope>/<ref>"` (lossless — every entity page corresponds to exactly one chunk page).
+3. **`vectordb.py graph pages`** fetches entities **of these pages** + their 1-hop relationships.
+4. **Merge with KG quota:** ~⅓ of slots (`floor(maxResults/3)`) are reserved for KG hits. Otherwise higher-scoring vector chunks (0.5+) would completely push out KG entities (fixed score 0.45) during slicing. Only entities **with** relationships pass through (relationship-less ones are just page placeholders).
 
-So fließt bei jeder Frage sowohl der relevante Volltext-Chunk als auch das Beziehungsgeflecht der relevanten Entities in meine Antwort ein.
+This way, both the relevant full-text chunk and the relationship network of relevant entities flow into my responses for every question.
 
-## Knowledge-Graph-CLI (manuelles Fallback / Debugging)
+## Knowledge Graph CLI (Manual Fallback / Debugging)
 
-Der Graph lebt in derselben `vectordb/index.sqlite` (Tabellen `entities`, `relationships`, `communities`).
+The graph lives in the same `vectordb/index.sqlite` (tables `entities`, `relationships`, `communities`).
 
 ```bash
 cd wikis_root
 PY=wikis_root/venv/bin/python3
 
-# Graph-Statistik (Anzahl Entities/Relationships, Typen, Orphans)
+# Graph statistics (entity/relationship counts, types, orphans)
 $PY scripts/vectordb.py graph stats
 
-# Label-/Description-Suche (LIKE) — nur für EXAKTE Mein-Begriffe/Namen
-$PY scripts/vectordb.py graph search --json --scopes private,family,public "Mein-Begriff"
+# Label/description search (LIKE) — only for EXACT concept names
+$PY scripts/vectordb.py graph search --json --scopes private,family,public "My-Concept"
 
-# Vektor→Graph-Bridge: Entities + Beziehungen für konkrete Seiten
+# Vector→Graph bridge: entities + relationships for specific pages
 $PY scripts/vectordb.py graph pages --json \
     --scopes private,family,public \
-    --pages "private/mein-thema,family/anderes-thema"
+    --pages "private/my-topic,family/another-topic"
 
-# Graph (neu) bauen — passiert normalerweise im nächtlichen Cron
-$PY scripts/vectordb.py graph build            # vollständig
-$PY scripts/vectordb.py graph build --incremental   # nur geänderte Seiten
+# Build graph — normally happens in nightly cron
+$PY scripts/vectordb.py graph build            # full rebuild
+$PY scripts/vectordb.py graph build --incremental   # only changed pages
 
-# Communities (Phase 2, igraph)
+# Communities (phase 2, igraph)
 $PY scripts/vectordb.py graph communities list
 ```
 
-`graph pages` und `graph search` liefern dasselbe JSON-Format:
+`graph pages` and `graph search` return the same JSON format:
 `{label, type, description, wiki_page, outgoing:[{relation_type,target,description}], incoming:[{relation_type,source,description}]}`.
 
-**Scope-Disziplin gilt auch hier:** `--scopes` immer auf die für den aktuellen Chat erlaubten Scopes setzen. Die `wiki_page` trägt den Scope als Präfix — der Filter greift defensiv darüber.
+**Scope discipline also applies here:** always set `--scopes` to the scopes allowed for the current chat. The `wiki_page` carries the scope as a prefix — the filter applies defensively on top of that.
 
-## Wartung — Plugin-Fallen (hart erkauft am 2026-05-22)
+## Maintenance — Plugin Pitfalls (Hard-Learned on 2026-05-22)
 
-- **Der Entry ist `dist/index.js`, nicht `index.ts`.** Nach **jedem** Edit an `index.ts` oder `lib/*.ts` zwingend neu bauen, sonst startet das Gateway nicht (`extension entry not found: dist/index.js`):
+- **The entry is `dist/index.js`, not `index.ts`.** After **every** edit to `index.ts` or `lib/*.ts`, you must rebuild or the gateway won't start (`extension entry not found: dist/index.js`):
   ```bash
   cd plugin/ && npm run build
   ```
-- **`tsconfig.json`** muss `module: ES2022` + `moduleResolution: bundler` + `ignoreDeprecations: "6.0"` nutzen (das Paket ist `type: module`). `commonjs`/`node` crasht unter TypeScript 6 (`TS5107`).
-- Vor riskanten Umbauten den funktionierenden Stand sichern (Konvention: `*.bak-pre-<thema>-<ts>`); bei Defekt `index.ts` von dort restaurieren und neu bauen.
-- Nach Plugin-Änderung Gateway neu starten und prüfen:
+- **`tsconfig.json`** must use `module: ES2022` + `moduleResolution: bundler` + `ignoreDeprecations: "6.0"` (the package is `type: module`). `commonjs`/`node` crashes under TypeScript 6 (`TS5107`).
+- Before risky refactors, save the working state (convention: `*.bak-pre-<topic>-<timestamp>`); on failure restore from backup and rebuild.
+- After plugin changes, restart the gateway and verify:
   ```bash
   systemctl --user restart openclaw-gateway.service
   systemctl --user is-active openclaw-gateway.service   # → active
   ```
-- Schnelltest der Such-Kette ohne Gateway (zeigt, ob KG-Treffer ankommen):
+- Quick test of the search chain without gateway (shows whether KG hits arrive):
   ```bash
   cd plugin/
   node --input-type=module -e '
     import { searchWiki } from "./dist/lib/cli-wrapper.js";
-    const r = await searchWiki("Testfrage?", ["private","family","public"], 6);
+    const r = await searchWiki("Test question?", ["private","family","public"], 6);
     console.log(r.filter(x=>x.kind==="graph-entity"));'
   ```
 
-## Was am 2026-05-22 passiert ist
+## What Happened on 2026-05-22
 
-1. Ich hatte das Plugin angefasst („kg"-Arbeit), `index.ts` + `tsconfig.json` umgeschrieben, aber **nicht neu gebaut** → `dist/index.js` fehlte → Gateway-Crash beim Start.
-2. Fix: `tsconfig` auf ES2022/bundler zurück, funktionierende `index.ts` aus dem `pre-kg`-Backup restauriert (inkl. Scope-Gating), `npm run build`.
-3. Danach die eigentlich gewollte KG-Funktion sauber gebaut: neuer `graph pages`-Befehl in `vectordb.py` (Helper `_entities_to_json` + `cmd_graph_pages`) und die Vektor→Graph-Bridge in `lib/cli-wrapper.ts` mit KG-Quota.
+1. I touched the plugin ("KG" work), rewrote `index.ts` + `tsconfig.json`, but **did not rebuild** → `dist/index.js` was missing → gateway crash at startup.
+2. Fix: reverted `tsconfig` to ES2022/bundler, restored working `index.ts` from `pre-kg` backup (incl. scope gating), `npm run build`.
+3. Then properly built the intended KG function: new `graph pages` command in `vectordb.py` (helper `_entities_to_json` + `cmd_graph_pages`) and the vector→graph bridge in `lib/cli-wrapper.ts` with KG quota.
 
-Seitdem fließen bei natürlichsprachigen Fragen echte Graph-Beziehungen in meine Antworten (z. B. „Testfrage?" → `Vertrag 12345 — Projekt Musterort FINANZIERT_VON`).
+Since then, real graph relationships flow into my responses for natural-language questions (e.g., "Test question?" → `Contract 12345 — Project Musterort FINANCED_BY`).
