@@ -841,17 +841,9 @@ def write_distilled_metadata(
     temporary file in the same directory, then ``os.replace()`` for
     atomic swap. On interrupt the original file remains intact.
     """
-    import shutil
     meta_path = SOURCES / scope / source_id / "metadata.json"
     if not meta_path.exists():
         return
-
-    # Backup
-    backup_dir = SOURCES / f"sources_backup_{datetime.datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_path = backup_dir / scope / source_id / "metadata.json"
-    backup_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(meta_path), str(backup_path))
 
     # Read, merge
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -878,13 +870,11 @@ def _migrate_existing_metadata(scope: str) -> tuple[int, int]:
 
     Returns ``(distilled_count, not_distilled_count)``.
     """
-    import shutil
     pages = load_wiki_pages(scope)
     scope_dir = SOURCES / scope
     if not scope_dir.exists():
         return (0, 0)
 
-    backup_dir = SOURCES / f"sources_backup_{datetime.datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}"
     migrated = 0
     distilled_count = 0
     not_distilled_count = 0
@@ -915,10 +905,7 @@ def _migrate_existing_metadata(scope: str) -> tuple[int, int]:
                     target_page = slug
                     break
 
-        # Backup before modifying
-        backup_path = backup_dir / scope / source_id / "metadata.json"
-        backup_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(meta_path), str(backup_path))
+
 
         # Update metadata
         meta["distilled"] = is_referenced
