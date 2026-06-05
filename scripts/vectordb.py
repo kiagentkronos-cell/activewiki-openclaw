@@ -960,6 +960,49 @@ def init_db(conn: sqlite3.Connection) -> None:
 
     _record_graph_migration(conn, "v2_incremental_tables")
 
+    # Add valid_until column to relationships if not present (soft-delete for dedup)
+    if not _has_column(conn, "relationships", "valid_until"):
+        conn.execute("ALTER TABLE relationships ADD COLUMN valid_until TEXT DEFAULT NULL")
+        conn.commit()
+        _record_graph_migration(conn, "v3_relationships_valid_until")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Graph: Facts Cleanup (Dedup + Orphan Removal)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _deduplicate_relationships(conn: sqlite3.Connection) -> int:
+    """Soft-delete older duplicate relationships (same source+relation, multiple targets).
+
+    When the same entity has conflicting facts (e.g., old rent vs new rent),
+    the newest row (highest rowid) stays active; older rows get valid_until set.
+    Returns number of relationships invalidated."""
+    affected = conn.execute("""
+        UPDATE relationships SET valid_until = datetime('now')
+        WHERE id IN (
+            SELECT r1.id FROM relationships r1
+            JOIN relationships r2 ON r1.source_id = r2.source_id
+                                 AND r1.relation_type = r2.relation_type
+                                 AND r1.id != r2.id
+                                 AND r1.valid_until IS NULL AND r2.valid_until IS NULL
+                                 AND r1.rowid < r2.rowid
+        )
+    """).rowcount
+    return affected
+
+
+def _cleanup_orphaned_relationships(conn: sqlite3.Connection) -> int:
+    """Soft-delete relationships whose source or target entity no longer exists.
+    Returns number of relationships invalidated."""
+    affected = conn.execute("""
+        UPDATE relationships SET valid_until = datetime('now')
+        WHERE (source_id NOT IN (SELECT id FROM entities)
+               OR target_id NOT IN (SELECT id FROM entities))
+               AND valid_until IS NULL
+    """).rowcount
+    return affected
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Document Gathering
@@ -1725,7 +1768,7 @@ def process_page(
         ).hexdigest()[:16]
 
         existing_rel = conn.execute(
-            "SELECT 1 FROM relationships WHERE source_id=? AND target_id=? AND relation_type=?",
+            "SELECT 1 FROM relationships WHERE source_id=? AND target_id=? AND relation_type=? AND valid_until IS NULL",
             (src_id, tgt_id, rel_type),
         ).fetchone()
         if not existing_rel:
@@ -1996,8 +2039,14 @@ def build_graph(page_slug: str | None = None, incremental: bool = False) -> None
 
         conn.commit()
 
+        # Facts cleanup: deduplicate conflicting facts + remove orphans
+        deduped = _deduplicate_relationships(conn)
+        orphans = _cleanup_orphaned_relationships(conn)
+        conn.commit()
+
         log("graph", f"Done: {total_entities} entities, {total_relations} relations "
               f"from {len(pages)} pages ({skipped} skipped) → {DB_PATH}")
+        log("graph", f"Deduplicated {deduped} relationships, cleaned up {orphans} orphans")
 
     conn.close()
 
@@ -2111,7 +2160,7 @@ def _build_igraph(conn: sqlite3.Connection):
         "SELECT id, label, entity_type FROM entities"
     ).fetchall()
     relationships = conn.execute(
-        "SELECT source_id, target_id, relation_type FROM relationships"
+        "SELECT source_id, target_id, relation_type FROM relationships WHERE valid_until IS NULL"
     ).fetchall()
 
     g = ig.Graph()
@@ -2212,7 +2261,8 @@ def _detect_communities(
             "JOIN entities e1 ON r.source_id = e1.id "
             "JOIN entities e2 ON r.target_id = e2.id "
             "WHERE r.source_id IN (" + ",".join("?" * len(member_ids)) + ") "
-            "AND r.target_id IN (" + ",".join("?" * len(member_ids)) + ")",
+            "AND r.target_id IN (" + ",".join("?" * len(member_ids)) + ") "
+            "AND r.valid_until IS NULL",
             member_ids + member_ids,
         ).fetchall()
 
@@ -2433,22 +2483,28 @@ def cmd_graph_stats() -> dict:
                  "message": "Graph tables not yet created. Run `vectordb.py graph build` first."}
 
     total_entities = conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
-    total_relations = conn.execute("SELECT COUNT(*) FROM relationships").fetchone()[0]
+    total_relations_active = conn.execute(
+        "SELECT COUNT(*) FROM relationships WHERE valid_until IS NULL"
+    ).fetchone()[0]
+    total_relations_inactive = conn.execute(
+        "SELECT COUNT(*) FROM relationships WHERE valid_until IS NOT NULL"
+    ).fetchone()[0]
+    total_relations = total_relations_active + total_relations_inactive
 
     by_type = dict(conn.execute(
         "SELECT entity_type, COUNT(*) FROM entities GROUP BY entity_type ORDER BY COUNT(*) DESC"
     ).fetchall())
 
     by_rel_type = dict(conn.execute(
-        "SELECT relation_type, COUNT(*) FROM relationships GROUP BY relation_type ORDER BY COUNT(*) DESC"
+        "SELECT relation_type, COUNT(*) FROM relationships WHERE valid_until IS NULL GROUP BY relation_type ORDER BY COUNT(*) DESC"
     ).fetchall())
 
     orphans = conn.execute(
         """
         SELECT e.id, e.label, e.entity_type
         FROM entities e
-        WHERE e.id NOT IN (SELECT source_id FROM relationships)
-          AND e.id NOT IN (SELECT target_id FROM relationships)
+        WHERE e.id NOT IN (SELECT source_id FROM relationships WHERE valid_until IS NULL)
+          AND e.id NOT IN (SELECT target_id FROM relationships WHERE valid_until IS NULL)
         ORDER BY e.label
         """
     ).fetchall()
@@ -2458,6 +2514,7 @@ def cmd_graph_stats() -> dict:
         SELECT e.id, e.label, COUNT(r.id) AS degree
         FROM entities e
         JOIN relationships r ON (r.source_id = e.id OR r.target_id = e.id)
+        WHERE r.valid_until IS NULL
         GROUP BY e.id
         ORDER BY degree DESC
         LIMIT 10
@@ -2474,6 +2531,8 @@ def cmd_graph_stats() -> dict:
         "db_path": str(DB_PATH),
         "entities": total_entities,
         "relationships": total_relations,
+        "relationships_active": total_relations_active,
+        "relationships_inactive": total_relations_inactive,
         "by_entity_type": by_type,
         "by_relation_type": by_rel_type,
         "orphans": len(orphans),
@@ -2502,8 +2561,8 @@ def cmd_graph_validate() -> dict:
         """
         SELECT e.id, e.label, e.entity_type, e.wiki_page
         FROM entities e
-        WHERE e.id NOT IN (SELECT source_id FROM relationships)
-          AND e.id NOT IN (SELECT target_id FROM relationships)
+        WHERE e.id NOT IN (SELECT source_id FROM relationships WHERE valid_until IS NULL)
+          AND e.id NOT IN (SELECT target_id FROM relationships WHERE valid_until IS NULL)
         ORDER BY e.label
         """
     ).fetchall()
@@ -2548,7 +2607,7 @@ def cmd_graph_validate() -> dict:
         FROM relationships r
         LEFT JOIN entities es ON r.source_id = es.id
         LEFT JOIN entities et ON r.target_id = et.id
-        WHERE es.id IS NULL OR et.id IS NULL
+        WHERE r.valid_until IS NULL AND (es.id IS NULL OR et.id IS NULL)
         """
     ).fetchall()
     if broken:
@@ -2559,7 +2618,7 @@ def cmd_graph_validate() -> dict:
         })
 
     loops = conn.execute(
-        "SELECT id, source_id, relation_type FROM relationships WHERE source_id = target_id"
+        "SELECT id, source_id, relation_type FROM relationships WHERE source_id = target_id AND valid_until IS NULL"
     ).fetchall()
     if loops:
         issues.append({
@@ -2585,13 +2644,13 @@ def _entities_to_json(conn: sqlite3.Connection, rows) -> list[dict]:
         rels_out = conn.execute(
             "SELECT r.relation_type, r.description, e.label "
             "FROM relationships r JOIN entities e ON r.target_id = e.id "
-            "WHERE r.source_id = ?",
+            "WHERE r.source_id = ? AND r.valid_until IS NULL",
             (eid,),
         ).fetchall()
         rels_in = conn.execute(
             "SELECT r.relation_type, r.description, e.label "
             "FROM relationships r JOIN entities e ON r.source_id = e.id "
-            "WHERE r.target_id = ?",
+            "WHERE r.target_id = ? AND r.valid_until IS NULL",
             (eid,),
         ).fetchall()
         result.append({
@@ -2718,14 +2777,14 @@ def cmd_graph_search(query: str, as_json: bool = False, scopes: list[str] | None
             rels_out = conn.execute(
                 "SELECT r.relation_type, r.description, e.label "
                 "FROM relationships r JOIN entities e ON r.target_id = e.id "
-                "WHERE r.source_id = ?",
+                "WHERE r.source_id = ? AND r.valid_until IS NULL",
                 (eid,),
             ).fetchall()
 
             rels_in = conn.execute(
                 "SELECT r.relation_type, r.description, e.label "
                 "FROM relationships r JOIN entities e ON r.source_id = e.id "
-                "WHERE r.target_id = ?",
+                "WHERE r.target_id = ? AND r.valid_until IS NULL",
                 (eid,),
             ).fetchall()
 
@@ -2752,14 +2811,14 @@ def cmd_graph_search(query: str, as_json: bool = False, scopes: list[str] | None
         rels_out = conn.execute(
             "SELECT r.relation_type, r.description, e.label "
             "FROM relationships r JOIN entities e ON r.target_id = e.id "
-            "WHERE r.source_id = ?",
+            "WHERE r.source_id = ? AND r.valid_until IS NULL",
             (eid,),
         ).fetchall()
 
         rels_in = conn.execute(
             "SELECT r.relation_type, r.description, e.label "
             "FROM relationships r JOIN entities e ON r.source_id = e.id "
-            "WHERE r.target_id = ?",
+            "WHERE r.target_id = ? AND r.valid_until IS NULL",
             (eid,),
         ).fetchall()
 
@@ -2963,6 +3022,7 @@ def cmd_communities_show(community_id: str) -> None:
             f"JOIN entities e2 ON r.target_id = e2.id "
             f"WHERE r.source_id IN ({placeholders}) "
             f"AND r.target_id IN ({placeholders}) "
+            f"AND r.valid_until IS NULL"
             f"ORDER BY r.relation_type",
             member_ids + member_ids,
         ).fetchall()
@@ -3047,6 +3107,12 @@ def main() -> int:
 
     # graph validate
     graph_sub.add_parser("validate", help="Validate graph integrity")
+
+    # graph deduplicate
+    graph_sub.add_parser("deduplicate", help="Deduplicate conflicting relationships (older → valid_until)")
+
+    # graph cleanup
+    graph_sub.add_parser("cleanup", help="Clean up orphaned relationships (missing source/target)")
 
     # graph search
     sp_gs = graph_sub.add_parser("search", help="Search the knowledge graph")
@@ -3139,6 +3205,26 @@ def main() -> int:
         elif gc == "validate":
             result = cmd_graph_validate()
             print(json.dumps(result, indent=2, ensure_ascii=False))
+        elif gc == "deduplicate":
+            if not DB_PATH.exists():
+                log("error", " Database not found. Run `vectordb.py graph build` first.", stderr=True)
+                sys.exit(1)
+            conn = sqlite3.connect(DB_PATH)
+            init_db(conn)
+            deduped = _deduplicate_relationships(conn)
+            conn.commit()
+            conn.close()
+            log("info", f"Deduplicated {deduped} relationships")
+        elif gc == "cleanup":
+            if not DB_PATH.exists():
+                log("error", " Database not found. Run `vectordb.py graph build` first.", stderr=True)
+                sys.exit(1)
+            conn = sqlite3.connect(DB_PATH)
+            init_db(conn)
+            cleaned = _cleanup_orphaned_relationships(conn)
+            conn.commit()
+            conn.close()
+            log("info", f"Cleaned up {cleaned} orphaned relationships")
         elif gc == "search":
             scopes = None
             if getattr(args, "scopes", None):
