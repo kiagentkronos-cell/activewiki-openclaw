@@ -198,6 +198,12 @@ CONFIDENCE_ORDER = {
 }
 DEFAULT_CONFIDENCE = "inferred"
 
+# ── HTML Graph Export Config ───────────────────────────────────────
+HTML_GRAPH_MAX_NODES = 200
+HTML_GRAPH_MAX_EDGES = 500
+_D3_LOCAL_PATH = Path(__file__).parent.parent / "assets" / "d3.v7.min.js"
+_GRAPH_OUTPUT_DIR = Path(__file__).parent.parent / "output"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Entity Registry - Persistent Known-Entity Store
@@ -3003,6 +3009,234 @@ def cmd_graph_search(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  HTML Graph Export (Phase 2C — data layer only)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _build_graph_data(
+    db: sqlite3.Connection,
+    query: str,
+    min_confidence: str | None = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Build subgraph data for HTML export.
+
+    1. Find seed entities matching *query*.
+    2. Expand to 1-hop neighbours (both directions).
+    3. Collect relationships among all discovered entities.
+
+    Args:
+        db: Open SQLite connection.
+        query: Text to match against entity labels and descriptions.
+        min_confidence: If set, filter relationships by confidence level
+            (must be one of CONFIDENCE_ORDER keys).
+
+    Returns:
+        (entities_list, relationships_list) as plain Python lists of dicts.
+    """
+    like = f"%{query}%"
+
+    # ── Step 1: Seed entities ────────────────────────────────────────
+    seed_rows = db.execute(
+        "SELECT id, label, entity_type, COALESCE(description, '') FROM entities "
+        "WHERE (label LIKE ? OR description LIKE ?) COLLATE NOCASE AND valid_until IS NULL",
+        (like, like),
+    ).fetchall()
+
+    seed_ids = {row[0] for row in seed_rows}
+    if not seed_ids:
+        return [], []
+
+    seed_ids_str = ", ".join(f"'{sid}'" for sid in seed_ids)
+
+    # ── Step 2: 1-hop neighbours (both directions) ──────────────────
+    neighbour_rows = db.execute(
+        f"SELECT e.id, e.label, e.entity_type, COALESCE(e.description, '') "
+        "FROM entities e "
+        "INNER JOIN relationships r ON (r.source_id = e.id OR r.target_id = e.id) "
+        f"WHERE (r.source_id IN ({seed_ids_str}) OR r.target_id IN ({seed_ids_str})) "
+        "AND e.valid_until IS NULL AND r.valid_until IS NULL "
+        "UNION "
+        f"SELECT id, label, entity_type, COALESCE(description, '') FROM entities "
+        f"WHERE id IN ({seed_ids_str})"
+    ).fetchall()
+
+    all_ids = {row[0] for row in neighbour_rows}
+    all_ids_str = ", ".join(f"'{eid}'" for eid in all_ids)
+
+    # ── Step 3: Relationships among discovered entities ──────────────
+    rel_where = f"source_id IN ({all_ids_str}) AND target_id IN ({all_ids_str}) AND valid_until IS NULL"
+    if min_confidence and min_confidence in CONFIDENCE_ORDER:
+        min_val = CONFIDENCE_ORDER[min_confidence]
+        rel_where += (
+            f" AND CASE confidence WHEN 'extracted' THEN 3 WHEN 'inferred' THEN 2 ELSE 1 END >= {min_val}"
+        )
+
+    rel_rows = db.execute(
+        f"SELECT source_id, target_id, relation_type, COALESCE(confidence, '{DEFAULT_CONFIDENCE}') "
+        f"FROM relationships WHERE {rel_where}"
+    ).fetchall()
+
+    # ── Build result structures ──────────────────────────────────────
+    entities = []
+    for eid, label, etype, desc in neighbour_rows:
+        entities.append({
+            "id": eid,
+            "label": label,
+            "type": etype,
+            "description": desc[:500],
+        })
+
+    relationships = []
+    for src, tgt, rtype, conf in rel_rows:
+        relationships.append({
+            "source_id": src,
+            "target_id": tgt,
+            "relation_type": rtype,
+            "confidence": conf,
+        })
+
+    return entities, relationships
+
+
+def _read_d3_script() -> str:
+    """Read the local D3.js minified script.
+
+    Raises SystemExit if the file is missing.
+    """
+    if not _D3_LOCAL_PATH.exists():
+        raise SystemExit(
+            f"D3.js file not found: {_D3_LOCAL_PATH}. "
+            "Download d3.v7.min.js to assets/"
+        )
+    return _D3_LOCAL_PATH.read_text(encoding="utf-8")
+
+
+def _generate_html_graph(
+    query: str,
+    nodes_json: str,
+    links_json: str,
+    d3_script: str,
+    has_private: bool = False,
+) -> str:
+    """Generate a static HTML graph file and return its path.
+
+    Applies hard limits, writes the file, and sets restrictive permissions.
+    The HTML template is a placeholder — replaced in a later step.
+
+    Args:
+        query: The original search query (used for filename).
+        nodes_json: JSON string of node data.
+        links_json: JSON string of link data.
+        d3_script: Raw D3.js JavaScript source.
+        has_private: Whether the graph contains private-scope entities.
+
+    Returns:
+        Absolute path to the generated HTML file.
+
+    Raises:
+        SystemExit: If node or edge count exceeds hard limits.
+    """
+    num_nodes = sum(1 for _ in nodes_json.split('"id":')) - 1
+    num_edges = sum(1 for _ in links_json.split('"source_id":')) - 1
+
+    if num_nodes > HTML_GRAPH_MAX_NODES:
+        raise SystemExit(
+            f"Graph too large: {num_nodes} nodes (max {HTML_GRAPH_MAX_NODES}). "
+            "Use a more specific query."
+        )
+    if num_edges > HTML_GRAPH_MAX_EDGES:
+        raise SystemExit(
+            f"Graph too large: {num_edges} edges (max {HTML_GRAPH_MAX_EDGES}). "
+            "Use a more specific query."
+        )
+
+    # Filename: graph_<md5(query)[:8]>.html
+    query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:8]
+    _GRAPH_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = _GRAPH_OUTPUT_DIR / f"graph_{query_hash}.html"
+
+    # Placeholder template — will be replaced with real D3 template later
+    banner = "\n<!-- CONFIDENTIAL: Contains private wiki data -->\n" if has_private else ""
+    html_template = (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n<head>\n'
+        "<meta charset=\"utf-8\">\n"
+        "<title>ActiveWiki Graph — {query}</title>\n"
+        "{banner}"
+        "</head>\n<body>\n"
+        "<div id=\"graph\"></div>\n"
+        "<script>\n"
+        "// D3.js will be injected here\n"
+        "{d3_script}\n"
+        "</script>\n"
+        "<script>\n"
+        "const nodes = {nodes_json};\n"
+        "const links = {links_json};\n"
+        "// Graph rendering logic goes here (Phase 2C)\n"
+        "</script>\n"
+        "</body>\n</html>"
+    )
+
+    html_content = html_template.replace("{query}", query)
+    html_content = html_content.replace("{banner}", banner)
+    html_content = html_content.replace("{d3_script}", d3_script)
+    html_content = html_content.replace("{nodes_json}", nodes_json)
+    html_content = html_content.replace("{links_json}", links_json)
+
+    output_path.write_text(html_content, encoding="utf-8")
+    os.chmod(str(output_path), 0o600)
+
+    return str(output_path)
+
+
+def cmd_graph_html(query: str, min_confidence: str | None = None) -> None:
+    """Generate an interactive HTML graph for a query and print the output path.
+
+    Args:
+        query: Text to search for seed entities.
+        min_confidence: Optional minimum confidence level for relationships.
+    """
+    if not _graph_has_tables():
+        log(
+            "error",
+            " Graph not built yet. Run `vectordb.py graph build` first.",
+            stderr=True,
+        )
+        sys.exit(1)
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        entities, relationships = _build_graph_data(conn, query, min_confidence)
+    finally:
+        conn.close()
+
+    if not entities:
+        log("info", f"No entities matching '{query}'")
+        return
+
+    nodes_json = json.dumps(entities, ensure_ascii=False)
+    links_json = json.dumps(relationships, ensure_ascii=False)
+
+    # Check for private-scope entities
+    has_private = any(
+        e.get("type") == "PERSON" or e.get("type") == "PROPERTY"
+        for e in entities
+    )
+
+    d3_script = _read_d3_script()
+
+    output_path = _generate_html_graph(
+        query=query,
+        nodes_json=nodes_json,
+        links_json=links_json,
+        d3_script=d3_script,
+        has_private=has_private,
+    )
+
+    print(output_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Community Commands
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -3309,6 +3543,15 @@ def main() -> int:
     sp_cshow = comm_sub.add_parser("show", help="Show a single community")
     sp_cshow.add_argument("id", help="Community ID (e.g. level-0-idx-0)")
 
+    # graph html
+    sp_gh = graph_sub.add_parser("html", help="Export an interactive HTML graph")
+    sp_gh.add_argument("query", help="Search query to find seed entities")
+    sp_gh.add_argument(
+        "--min-confidence",
+        choices=["extracted", "inferred", "ambiguous"],
+        default=None,
+        help="Only include relationships at or above this confidence level",
+    )
     args = ap.parse_args()
 
     # ── Dispatch ──
@@ -3413,6 +3656,9 @@ def main() -> int:
                 cmd_communities_show(args.id)
             else:
                 ap.print_help()
+        elif gc == "html":
+            min_conf = getattr(args, "min_confidence", None)
+            cmd_graph_html(args.query, min_confidence=min_conf)
         else:
             ap.print_help()
 
