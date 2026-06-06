@@ -178,7 +178,7 @@ def _should_exclude_from_graph(wiki_page: str) -> bool:
 # ── Entity / Relationship type lists ──
 ENTITY_TYPES = [
     "PERSON", "ORGANIZATION", "LOCATION", "DOCUMENT", "PROPERTY",
-    "FACILITY", "CONCEPT", "DATE", "MONEY", "EVENT",
+    "FACILITY", "CONCEPT", "DATE", "MONEY", "EVENT", "RATIONALE",
 ]
 
 # ── Cross-type fuzzy threshold (stricter than same-type FUZZY_THRESHOLD) ──
@@ -364,6 +364,8 @@ RELATION_TYPES = [
     "VERMIETET_AN", "ARBEITET_BEI", "KREDIT_BEI",
     "HAT_KOMPONENTE", "HAT_EIGENSCHAFT", "REFERENZIERT",
     "STAMMT_VON", "KOSTET",
+    # Why-Nodes (Phase 2B): Rationale ↔ Fact linking
+    "ERKLÄRT_MIT", "HINTET_AUF", "WEGEN",
 ]
 
 # ── Timestamped Logging ─────────────────────────────────────────────────────
@@ -458,6 +460,31 @@ Bad: {"id": "d41d8cd9f000-Musterdokument", "label": "d41d8cd9f000-Musterdokument
 Bad: {"id": "trends", "label": "trends", "type": "CONCEPT"} → Frontmatter-Tag
 Bad: {"id": "haupt-entity-xyz", "label": "Haupt-Entity der Seite xyz", "type": "CONCEPT"} → Meta-Platzhalter
 Bad: {"source": "A", "target": "B", "type": "BEZOGEN_AUF"} → Fast immer falsch
+
+## WHY-NODES: Rationale-Extraktion (Phase 2B)
+Wenn ein Text einen Grund, eine Erklärung oder einen Kommentar liefert, extrahiere
+den Grund als eigene Rationale-Entity und verlinke sie mit der Fakten-Entity.
+
+**Trigger-Wörter:** "da", "weil", "wegen", "aufgrund", "Hinweis:", "# NOTE:", "Kommentar:", "Grund:"
+
+**Regeln:**
+1. **NUR einfache Fälle:** Ursache + Wirkung im selben Satz, eindeutig zugeordnet.
+2. **NICHT extrahieren bei komplexen Fällen:** "Miete stieg wegen X, aber Versicherung fiel wegen Y" → zu komplex, überspringen!
+3. Rationale-Entity-Typ = **RATIONALE**, Label = die Kurzform des Grundes (max 80 Zeichen)
+4. Verknüpfung: Rationale-Entity → Fakten-Entity mit **ERKLÄRT_MIT** (oder **WEGEN** / **HINTET_AUF**)
+5. Confidence für Rationale-Relations = **extracted** wenn der Grund direkt im Text steht, **inferred** wenn abgeleitet
+
+**Beispiel:**
+> Mietpreis wurde von 650€ auf 720€ erhöht, da die Nebenkosten sich 2024 verdoppelt haben.
+
+Extraktion:
+- Entity: `720-euro-miete` (Typ: MONEY, Label: "720€ Miete")
+- Entity: `nebenkosten-verdopplung-2024` (Typ: RATIONALE, Label: "Nebenkosten verdoppelten sich 2024")
+- Relation: `nebenkosten-verdopplung-2024` -ERKLÄRT_MIT→ `720-euro-miete` (confidence: extracted)
+
+**Negatives Beispiel (NICHT tun):**
+> Miete stieg wegen Inflation, aber die Versicherung fiel wegen weniger Schäden.
+→ Zwei Gründe für zwei Fakten → zu komplex → KEINE Rationale-Extraktion!
 
 ## POSITIVE BEISPIELE (mit Relations + Confidence!)
 Good (extracted — direkte Aussagen):
@@ -556,6 +583,17 @@ Good (Kochbuch):
   ],
   "relationships": [
     {"source": "schnitzel-wiener-art", "target": "semmelbrösel", "type": "HAT_KOMPONENTE", "description": "Wird paniert mit Semmelbrösel", "confidence": "extracted"}
+  ]
+}
+
+Good (Rationale / Why-Node):
+{
+  "entities": [
+    {"id": "720-euro-miete", "label": "720€ Miete", "type": "MONEY"},
+    {"id": "nebenkosten-verdopplung-2024", "label": "Nebenkosten verdoppelten sich 2024", "type": "RATIONALE"}
+  ],
+  "relationships": [
+    {"source": "nebenkosten-verdopplung-2024", "target": "720-euro-miete", "type": "ERKLÄRT_MIT", "description": "Miete stieg wegen Nebenkosten", "confidence": "extracted"}
   ]
 }
 
@@ -2734,9 +2772,20 @@ def cmd_graph_validate() -> dict:
     }
 
 
-def _entities_to_json(conn: sqlite3.Connection, rows) -> list[dict]:
+def _entities_to_json(
+    conn: sqlite3.Connection,
+    rows,
+    with_rationale: bool = False,
+) -> list[dict]:
     """Build the graph JSON shape (entity + 1-hop relations) for rows of
-    (id, label, entity_type, description, wiki_page). Shared by graph search/pages."""
+    (id, label, entity_type, description, wiki_page). Shared by graph search/pages.
+
+    Args:
+        conn: Open SQLite connection.
+        rows: Rows of (id, label, entity_type, description, wiki_page).
+        with_rationale: If True, also include incoming ERKLÄRT_MIT/WEGEN/HINTET_AUF
+            relations from RATIONALE entities as a "rationale" field.
+    """
     result = []
     for eid, label, etype, desc, page in rows:
         rels_out = conn.execute(
@@ -2751,7 +2800,8 @@ def _entities_to_json(conn: sqlite3.Connection, rows) -> list[dict]:
             "WHERE r.target_id = ? AND r.valid_until IS NULL",
             (eid,),
         ).fetchall()
-        result.append({
+
+        entry: dict[str, object] = {
             "label": label,
             "type": etype,
             "description": desc or "",
@@ -2764,7 +2814,26 @@ def _entities_to_json(conn: sqlite3.Connection, rows) -> list[dict]:
                 {"relation_type": rt, "source": sl, "description": rd or "", "confidence": conf or DEFAULT_CONFIDENCE}
                 for rt, rd, sl, conf in rels_in[:10]
             ],
-        })
+        }
+
+        # Phase 2B: attach rationale nodes (incoming ERKLÄRT_MIT/WEGEN/HINTET_AUF from RATIONALE entities)
+        if with_rationale:
+            rationale_rows = conn.execute(
+                "SELECT r.relation_type, r.description, e.label, r.confidence "
+                "FROM relationships r JOIN entities e ON r.source_id = e.id "
+                "WHERE r.target_id = ? "
+                "AND r.valid_until IS NULL "
+                "AND r.relation_type IN ('ERKLÄRT_MIT', 'WEGEN', 'HINTET_AUF') "
+                "AND e.entity_type = 'RATIONALE'",
+                (eid,),
+            ).fetchall()
+            if rationale_rows:
+                entry["rationale"] = [
+                    {"relation_type": rt, "source": sl, "description": rd or "", "confidence": conf or DEFAULT_CONFIDENCE}
+                    for rt, rd, sl, conf in rationale_rows[:5]
+                ]
+
+        result.append(entry)
     return result
 
 
@@ -2821,7 +2890,12 @@ def cmd_graph_pages(pages: list[str], as_json: bool = False, scopes: list[str] |
         conn.close()
 
 
-def cmd_graph_search(query: str, as_json: bool = False, scopes: list[str] | None = None) -> None:
+def cmd_graph_search(
+    query: str,
+    as_json: bool = False,
+    scopes: list[str] | None = None,
+    with_rationale: bool = False,
+) -> None:
     """Simple graph lookup: find entities matching query + their 1-hop relations.
 
     Args:
@@ -2829,6 +2903,8 @@ def cmd_graph_search(query: str, as_json: bool = False, scopes: list[str] | None
         as_json: If True, emit a JSON array to stdout instead of log-lines.
         scopes: Optional list of scope prefixes (e.g. ["private", "family"])
                 to filter entities by their wiki_page field.
+        with_rationale: If True, also show incoming ERKLÄRT_MIT/WEGEN/HINTET_AUF
+            relations from RATIONALE entities (Phase 2B Why-Nodes).
     """
     if not _graph_has_tables():
         if as_json:
@@ -2859,7 +2935,7 @@ def cmd_graph_search(query: str, as_json: bool = False, scopes: list[str] | None
         return
 
     if as_json:
-        result = _entities_to_json(conn, rows)
+        result = _entities_to_json(conn, rows, with_rationale=with_rationale)
         conn.close()
         print(json.dumps(result, ensure_ascii=False))
     else:
@@ -2901,6 +2977,25 @@ def cmd_graph_search(query: str, as_json: bool = False, scopes: list[str] | None
                     log("info", f"      \u2514\u2500 {source_label} {rtype} [confidence={conf_display}]")
                     if rdesc:
                         log("info", f"         {rdesc}")
+
+            # Phase 2B: show rationale nodes
+            if with_rationale:
+                rationale_rows = conn.execute(
+                    "SELECT r.relation_type, r.description, e.label, r.confidence "
+                    "FROM relationships r JOIN entities e ON r.source_id = e.id "
+                    "WHERE r.target_id = ? "
+                    "AND r.valid_until IS NULL "
+                    "AND r.relation_type IN ('ERKLÄRT_MIT', 'WEGEN', 'HINTET_AUF') "
+                    "AND e.entity_type = 'RATIONALE'",
+                    (eid,),
+                ).fetchall()
+                if rationale_rows:
+                    log("info", f"    \u2753 rationale ({len(rationale_rows)}):")
+                    for rtype, rdesc, source_label, conf in rationale_rows[:5]:
+                        conf_display = conf or DEFAULT_CONFIDENCE
+                        log("info", f"      \u2514\u2500 {source_label} {rtype} [confidence={conf_display}]")
+                        if rdesc:
+                            log("info", f"         {rdesc}")
 
             log("info", "")
 
@@ -3186,6 +3281,8 @@ def main() -> int:
     sp_gs.add_argument("--json", action="store_true", help="Output as JSON")
     sp_gs.add_argument("--scopes", type=str, default=None,
         help="Comma-separated list of scopes to filter by")
+    sp_gs.add_argument("--with-rationale", action="store_true",
+        help="Also show Rationale nodes (Why-Nodes) explaining facts")
 
     # graph pages (vector→graph bridge: entities anchored on given wiki pages)
     sp_gp = graph_sub.add_parser("pages", help="Entities (+1-hop) for given wiki pages")
@@ -3295,7 +3392,8 @@ def main() -> int:
             scopes = None
             if getattr(args, "scopes", None):
                 scopes = [s.strip() for s in args.scopes.split(",")]
-            cmd_graph_search(args.query, as_json=getattr(args, "json", False), scopes=scopes)
+            with_rat = getattr(args, "with_rationale", False)
+            cmd_graph_search(args.query, as_json=getattr(args, "json", False), scopes=scopes, with_rationale=with_rat)
         elif gc == "pages":
             scopes = None
             if getattr(args, "scopes", None):
