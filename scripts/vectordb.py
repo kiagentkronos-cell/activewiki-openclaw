@@ -189,6 +189,15 @@ PRIORITY_ENTITY_TYPES = ["PERSON", "PROPERTY", "ORGANIZATION", "LOCATION"]
 MAX_ENTRIES_PER_PRIORITY_TYPE = 10
 MAX_REGISTRY_PROMPT_ENTRIES = 30
 
+# ── Confidence Levels ──────────────────────────────────────────────
+# Numeric ordering for confidence comparison (higher = more certain)
+CONFIDENCE_ORDER = {
+    "extracted": 3,   # Direct statement in source text
+    "inferred": 2,    # Logical conclusion derived from text
+    "ambiguous": 1,   # Uncertain or multi-interpretable
+}
+DEFAULT_CONFIDENCE = "inferred"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Entity Registry - Persistent Known-Entity Store
@@ -450,6 +459,54 @@ Bad: {"id": "trends", "label": "trends", "type": "CONCEPT"} → Frontmatter-Tag
 Bad: {"id": "haupt-entity-xyz", "label": "Haupt-Entity der Seite xyz", "type": "CONCEPT"} → Meta-Platzhalter
 Bad: {"source": "A", "target": "B", "type": "BEZOGEN_AUF"} → Fast immer falsch
 
+## POSITIVE BEISPIELE (mit Relations + Confidence!)
+Good (extracted — direkte Aussagen):
+{
+  "entities": [
+    {"id": "max-mustermann", "label": "Max Mustermann", "type": "PERSON"},
+    {"id": "gruenwald", "label": "Gruenwald", "type": "LOCATION"},
+    {"id": "haus-gruenwald", "label": "Haus in Gruenwald", "type": "PROPERTY"},
+    {"id": "720-euro-miete", "label": "720€ Miete", "type": "MONEY"}
+  ],
+  "relationships": [
+    {"source": "max-mustermann", "target": "gruenwald", "type": "BELEGT", "description": "Max wohnt in Gruenwald", "confidence": "extracted"},
+    {"source": "max-mustermann", "target": "haus-gruenwald", "type": "BESITZT", "description": "Max besitzt das Haus", "confidence": "extracted"},
+    {"source": "haus-gruenwald", "target": "720-euro-miete", "type": "KOSTET", "description": "Mietpreis beträgt 720€", "confidence": "extracted"}
+  ]
+}
+
+Good (inferred — Schlussfolgerung):
+{
+  "entities": [
+    {"id": "max-mustermann", "label": "Max Mustermann", "type": "PERSON"},
+    {"id": "immobilien-investor", "label": "Immobilieninvestor", "type": "CONCEPT"}
+  ],
+  "relationships": [
+    {"source": "max-mustermann", "target": "immobilien-investor", "type": "HAT_EIGENSCHAFT", "description": "Max investiert in Immobilien", "confidence": "inferred"}
+  ]
+}
+
+Good (ambiguous — mehrdeutig):
+{
+  "entities": [
+    {"id": "simba", "label": "Simba", "type": "CONCEPT"}
+  ],
+  "relationships": [
+    {"source": "simba", "target": "hund", "type": "BEZOGEN_AUF", "description": "Simba könnte ein Hund sein", "confidence": "ambiguous"}
+  ]
+}
+
+## CONFIDENCE LEVELS (wichtig für Vertrauen!)
+Jede Beziehung braucht ein Confidence-Level:
+- **extracted** = direkte Aussage im Text (z.B. "Mietpreis: 720€", "Max wohnt in Gruenwald")
+- **inferred** = logische Schlussfolgerung (z.B. "Max besitzt Haus → er investiert")
+- **ambiguous** = mehrdeutig oder unsicher (z.B. "Simba" — Hund? Katze? Person?)
+
+Regeln:
+1. Wenn es direkt im Text steht → **extracted**
+2. Wenn du es schlussfolgern musst → **inferred**
+3. Wenn du dir unsicher bist → **ambiguous** (lieber ambiguous als falsches extracted!)
+
 ## POSITIVE BEISPIELE (mit Relations!)
 Good: {
   "entities": [
@@ -459,9 +516,9 @@ Good: {
     {"id": "landratsamt-musterstadt", "label": "Landratsamt Musterstadt", "type": "ORGANIZATION"}
   ],
   "relationships": [
-    {"source": "max-mustermann", "target": "haus-muster-1a", "type": "BESITZT", "description": "Max besitzt das Haus"},
-    {"source": "haus-hauptstr-12a", "target": "gruenwald", "type": "BEFINDET_SICH_IN", "description": "Haus liegt in Gruenwald"},
-    {"source": "max-mustermann", "target": "behoerde-musterstadt", "type": "VERTRAG_MIT", "description": "Vertrag mit Behörde"}
+    {"source": "max-mustermann", "target": "haus-muster-1a", "type": "BESITZT", "description": "Max besitzt das Haus", "confidence": "extracted"},
+    {"source": "haus-hauptstr-12a", "target": "gruenwald", "type": "BEFINDET_SICH_IN", "description": "Haus liegt in Gruenwald", "confidence": "extracted"},
+    {"source": "max-mustermann", "target": "behoerde-musterstadt", "type": "VERTRAG_MIT", "description": "Vertrag mit Behörde", "confidence": "inferred"}
   ]
 }
 
@@ -473,8 +530,8 @@ Good (Immobilien):
     {"id": "1200-euro-miete", "label": "1200€ monatliche Miete", "type": "MONEY"}
   ],
   "relationships": [
-    {"source": "wohnung-muenchen-maxvorstadt", "target": "allianz-versicherung", "type": "VERSICHERT_BEI", "description": "Wohnung versichert bei Allianz"},
-    {"source": "wohnung-muenchen-maxvorstadt", "target": "1200-euro-miete", "type": "KOSTET", "description": "Monatliche Miete"}
+    {"source": "wohnung-muenchen-maxvorstadt", "target": "allianz-versicherung", "type": "VERSICHERT_BEI", "description": "Wohnung versichert bei Allianz", "confidence": "extracted"},
+    {"source": "wohnung-muenchen-maxvorstadt", "target": "1200-euro-miete", "type": "KOSTET", "description": "Monatliche Miete", "confidence": "extracted"}
   ]
 }
 
@@ -486,8 +543,8 @@ Good (Technik):
     {"id": "10kw-leistung", "label": "10 kW Spitzenleistung", "type": "CONCEPT"}
   ],
   "relationships": [
-    {"source": "e3dc-hauskraftwerk-s10", "target": "e3dc-gmbh", "type": "STAMMT_VON", "description": "Hersteller des Systems"},
-    {"source": "e3dc-hauskraftwerk-s10", "target": "10kw-leistung", "type": "HAT_EIGENSCHAFT", "description": "Maximale Leistung"}
+    {"source": "e3dc-hauskraftwerk-s10", "target": "e3dc-gmbh", "type": "STAMMT_VON", "description": "Hersteller des Systems", "confidence": "extracted"},
+    {"source": "e3dc-hauskraftwerk-s10", "target": "10kw-leistung", "type": "HAT_EIGENSCHAFT", "description": "Maximale Leistung", "confidence": "extracted"}
   ]
 }
 
@@ -498,7 +555,7 @@ Good (Kochbuch):
     {"id": "semmelbrösel", "label": "Semmelbrösel", "type": "CONCEPT"}
   ],
   "relationships": [
-    {"source": "schnitzel-wiener-art", "target": "semmelbrösel", "type": "HAT_KOMPONENTE", "description": "Wird paniert mit Semmelbrösel"}
+    {"source": "schnitzel-wiener-art", "target": "semmelbrösel", "type": "HAT_KOMPONENTE", "description": "Wird paniert mit Semmelbrösel", "confidence": "extracted"}
   ]
 }
 
@@ -509,7 +566,7 @@ Du MUSST gültiges JSON zurückgeben mit genau dieser Struktur:
     {"id": "kebab-case-id", "label": "Lesbarer Name", "type": "ENTITY_TYPE", "description": "Max 25 Zeichen"}
   ],
   "relationships": [
-    {"source": "entity_id_a", "target": "entity_id_b", "type": "RELATION_TYPE", "description": "Was verbindet sie"}
+    {"source": "entity_id_a", "target": "entity_id_b", "type": "RELATION_TYPE", "description": "Was verbindet sie", "confidence": "extracted|inferred|ambiguous"}
   ]
 }
 
@@ -966,6 +1023,12 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.commit()
         _record_graph_migration(conn, "v3_relationships_valid_until")
 
+    # Add confidence column to relationships if not present (Phase 2A: Confidence Tags)
+    if not _has_column(conn, "relationships", "confidence"):
+        conn.execute("ALTER TABLE relationships ADD COLUMN confidence TEXT DEFAULT 'inferred'")
+        conn.commit()
+        _record_graph_migration(conn, "v4_relationships_confidence")
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Graph: Facts Cleanup (Dedup + Orphan Removal)
@@ -973,20 +1036,37 @@ def init_db(conn: sqlite3.Connection) -> None:
 
 
 def _deduplicate_relationships(conn: sqlite3.Connection) -> int:
-    """Soft-delete older duplicate relationships (same source+relation, multiple targets).
+    """Soft-delete older duplicate relationships (same source+target+relation, multiple targets).
 
     When the same entity has conflicting facts (e.g., old rent vs new rent),
     the newest row (highest rowid) stays active; older rows get valid_until set.
+
+    Confidence-aware: a newer row can only replace an older row if its confidence
+    is >= the older row's confidence. An 'extracted' fact can NEVER be overwritten
+    by an 'inferred' or 'ambiguous' one.
+
     Returns number of relationships invalidated."""
     affected = conn.execute("""
         UPDATE relationships SET valid_until = datetime('now')
         WHERE id IN (
             SELECT r1.id FROM relationships r1
-            JOIN relationships r2 ON r1.source_id = r2.source_id
-                                 AND r1.relation_type = r2.relation_type
-                                 AND r1.id != r2.id
-                                 AND r1.valid_until IS NULL AND r2.valid_until IS NULL
-                                 AND r1.rowid < r2.rowid
+            JOIN relationships r2
+                ON r1.source_id = r2.source_id
+                AND r1.target_id = r2.target_id
+                AND r1.relation_type = r2.relation_type
+                AND r1.id != r2.id
+                AND r1.valid_until IS NULL AND r2.valid_until IS NULL
+                AND r1.rowid < r2.rowid
+                AND CASE r1.confidence
+                      WHEN 'extracted' THEN 3
+                      WHEN 'inferred' THEN 2
+                      ELSE 1
+                    END
+                 <= CASE r2.confidence
+                      WHEN 'extracted' THEN 3
+                      WHEN 'inferred' THEN 2
+                      ELSE 1
+                    END
         )
     """).rowcount
     return affected
@@ -1763,32 +1843,44 @@ def process_page(
             log("warn", f"  [graph-health] Relation missing type, dropping: {rel}", stderr=True)
             continue
         rel_desc = rel.get("description", "")
+        # Extract confidence from LLM output; default to 'inferred' if missing
+        rel_confidence = rel.get("confidence", DEFAULT_CONFIDENCE)
+        if rel_confidence not in CONFIDENCE_ORDER:
+            log("warn", f"  [graph-health] Invalid confidence '{rel_confidence}', defaulting to '{DEFAULT_CONFIDENCE}'", stderr=True)
+            rel_confidence = DEFAULT_CONFIDENCE
+
         rel_id = hashlib.sha256(
             f"{src_id}::{tgt_id}::{rel_type}".encode()
         ).hexdigest()[:16]
 
-        existing_rel = conn.execute(
-            "SELECT 1 FROM relationships WHERE source_id=? AND target_id=? AND relation_type=? AND valid_until IS NULL",
-            (src_id, tgt_id, rel_type),
+        # SELECT-first pattern: check existing rel by rel_id, decide INSERT vs UPDATE
+        existing_row = conn.execute(
+            "SELECT confidence FROM relationships WHERE id = ?",
+            (rel_id,),
         ).fetchone()
-        if not existing_rel:
+
+        if existing_row is None:
+            # New relationship — insert with confidence
             conn.execute(
-                "INSERT OR IGNORE INTO relationships(id, source_id, target_id, relation_type, description) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (rel_id, src_id, tgt_id, rel_type, rel_desc),
-            )
-            # Junction table: relationship → wiki_page
-            conn.execute(
-                "INSERT OR IGNORE INTO relationship_pages(rel_id, wiki_page) VALUES (?, ?)",
-                (rel_id, wiki_page),
+                "INSERT OR IGNORE INTO relationships(id, source_id, target_id, relation_type, description, confidence) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (rel_id, src_id, tgt_id, rel_type, rel_desc, rel_confidence),
             )
             inserted_rels += 1
-        else:
-            # Existing relation: still track it in junction table for this page
+        elif CONFIDENCE_ORDER[rel_confidence] > CONFIDENCE_ORDER[existing_row[0]]:
+            # Existing relationship — upgrade confidence if new one is higher
             conn.execute(
-                "INSERT OR IGNORE INTO relationship_pages(rel_id, wiki_page) VALUES (?, ?)",
-                (rel_id, wiki_page),
+                "UPDATE relationships SET confidence = ?, description = ? WHERE id = ?",
+                (rel_confidence, rel_desc, rel_id),
             )
+            log("graph-conf", f"  [confidence-upgrade] {src_id} -{rel_type}-> {tgt_id}: {existing_row[0]} → {rel_confidence}")
+        # else: existing confidence >= new confidence — skip (preserve higher certainty)
+
+        # Junction table: relationship → wiki_page (always track, regardless of insert/update)
+        conn.execute(
+            "INSERT OR IGNORE INTO relationship_pages(rel_id, wiki_page) VALUES (?, ?)",
+            (rel_id, wiki_page),
+        )
 
     if autocommit:
         conn.commit()
@@ -2499,6 +2591,11 @@ def cmd_graph_stats() -> dict:
         "SELECT relation_type, COUNT(*) FROM relationships WHERE valid_until IS NULL GROUP BY relation_type ORDER BY COUNT(*) DESC"
     ).fetchall())
 
+    # Confidence distribution (Phase 2A)
+    confidence_dist = dict(conn.execute(
+        "SELECT confidence, COUNT(*) FROM relationships WHERE valid_until IS NULL GROUP BY confidence ORDER BY COUNT(*) DESC"
+    ).fetchall())
+
     orphans = conn.execute(
         """
         SELECT e.id, e.label, e.entity_type
@@ -2535,6 +2632,7 @@ def cmd_graph_stats() -> dict:
         "relationships_inactive": total_relations_inactive,
         "by_entity_type": by_type,
         "by_relation_type": by_rel_type,
+        "confidence_distribution": confidence_dist,
         "orphans": len(orphans),
         "orphan_details": [{"id": o[0], "label": o[1], "type": o[2]} for o in orphans[:20]],
         "top_connected": [{"id": t[0], "label": t[1], "degree": t[2]} for t in top_connected],
@@ -2642,13 +2740,13 @@ def _entities_to_json(conn: sqlite3.Connection, rows) -> list[dict]:
     result = []
     for eid, label, etype, desc, page in rows:
         rels_out = conn.execute(
-            "SELECT r.relation_type, r.description, e.label "
+            "SELECT r.relation_type, r.description, e.label, r.confidence "
             "FROM relationships r JOIN entities e ON r.target_id = e.id "
             "WHERE r.source_id = ? AND r.valid_until IS NULL",
             (eid,),
         ).fetchall()
         rels_in = conn.execute(
-            "SELECT r.relation_type, r.description, e.label "
+            "SELECT r.relation_type, r.description, e.label, r.confidence "
             "FROM relationships r JOIN entities e ON r.source_id = e.id "
             "WHERE r.target_id = ? AND r.valid_until IS NULL",
             (eid,),
@@ -2659,12 +2757,12 @@ def _entities_to_json(conn: sqlite3.Connection, rows) -> list[dict]:
             "description": desc or "",
             "wiki_page": page or "",
             "outgoing": [
-                {"relation_type": rt, "target": tl, "description": rd or ""}
-                for rt, rd, tl in rels_out[:10]
+                {"relation_type": rt, "target": tl, "description": rd or "", "confidence": conf or DEFAULT_CONFIDENCE}
+                for rt, rd, tl, conf in rels_out[:10]
             ],
             "incoming": [
-                {"relation_type": rt, "source": sl, "description": rd or ""}
-                for rt, rd, sl in rels_in[:10]
+                {"relation_type": rt, "source": sl, "description": rd or "", "confidence": conf or DEFAULT_CONFIDENCE}
+                for rt, rd, sl, conf in rels_in[:10]
             ],
         })
     return result
@@ -2775,14 +2873,14 @@ def cmd_graph_search(query: str, as_json: bool = False, scopes: list[str] | None
                 log("info", f"    page: {page}")
 
             rels_out = conn.execute(
-                "SELECT r.relation_type, r.description, e.label "
+                "SELECT r.relation_type, r.description, e.label, r.confidence "
                 "FROM relationships r JOIN entities e ON r.target_id = e.id "
                 "WHERE r.source_id = ? AND r.valid_until IS NULL",
                 (eid,),
             ).fetchall()
 
             rels_in = conn.execute(
-                "SELECT r.relation_type, r.description, e.label "
+                "SELECT r.relation_type, r.description, e.label, r.confidence "
                 "FROM relationships r JOIN entities e ON r.source_id = e.id "
                 "WHERE r.target_id = ? AND r.valid_until IS NULL",
                 (eid,),
@@ -2790,55 +2888,23 @@ def cmd_graph_search(query: str, as_json: bool = False, scopes: list[str] | None
 
             if rels_out:
                 log("info", f"    \u2192 outgoing ({len(rels_out)}):")
-                for rtype, rdesc, target_label in rels_out[:10]:
-                    log("info", f"      \u2514\u2500 {rtype} \u2192 {target_label}")
+                for rtype, rdesc, target_label, conf in rels_out[:10]:
+                    conf_display = conf or DEFAULT_CONFIDENCE
+                    log("info", f"      \u2514\u2500 {rtype} \u2192 {target_label} [confidence={conf_display}]")
                     if rdesc:
                         log("info", f"         {rdesc}")
 
             if rels_in:
                 log("info", f"    \u2190 incoming ({len(rels_in)}):")
-                for rtype, rdesc, source_label in rels_in[:10]:
-                    log("info", f"      \u2514\u2500 {source_label} {rtype}")
+                for rtype, rdesc, source_label, conf in rels_in[:10]:
+                    conf_display = conf or DEFAULT_CONFIDENCE
+                    log("info", f"      \u2514\u2500 {source_label} {rtype} [confidence={conf_display}]")
                     if rdesc:
                         log("info", f"         {rdesc}")
 
             log("info", "")
 
         conn.close()
-
-
-
-        rels_out = conn.execute(
-            "SELECT r.relation_type, r.description, e.label "
-            "FROM relationships r JOIN entities e ON r.target_id = e.id "
-            "WHERE r.source_id = ? AND r.valid_until IS NULL",
-            (eid,),
-        ).fetchall()
-
-        rels_in = conn.execute(
-            "SELECT r.relation_type, r.description, e.label "
-            "FROM relationships r JOIN entities e ON r.source_id = e.id "
-            "WHERE r.target_id = ? AND r.valid_until IS NULL",
-            (eid,),
-        ).fetchall()
-
-        if rels_out:
-            log("info", f"    → outgoing ({len(rels_out)}):")
-            for rtype, rdesc, target_label in rels_out[:10]:
-                log("info", f"      └─ {rtype} → {target_label}")
-                if rdesc:
-                    log("info", f"         {rdesc}")
-
-        if rels_in:
-            log("info", f"    ← incoming ({len(rels_in)}):")
-            for rtype, rdesc, source_label in rels_in[:10]:
-                log("info", f"      └─ {source_label} {rtype}")
-                if rdesc:
-                    log("info", f"         {rdesc}")
-
-        log("info", "")
-
-    conn.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════
