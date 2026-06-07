@@ -1291,6 +1291,7 @@ def deduplicate_entities(
     conn: sqlite3.Connection,
     threshold: float = 0.95,
     string_threshold: float = 0.66,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Hybrid entity deduplication: embedding + string-based matching.
 
@@ -1392,6 +1393,54 @@ def deduplicate_entities(
         }
 
     log("dedup", f"Found {len(multi_clusters)} clusters (cosine pairs={pair_count_cosine}, jaccard pairs={pair_count_jaccard})")
+
+    # ── Step 5: Dry-run check ────────────────────────────────────────
+    if dry_run:
+        total_merged_dry = sum(len(m) - 1 for m in multi_clusters.values())
+        log("dedup", f"[DRY RUN] Would merge {total_merged_dry} entities across {len(multi_clusters)} clusters")
+
+        dry_merges = []
+        for root, members in multi_clusters.items():
+            if not members:
+                continue
+            canonical_idx = members[0]
+            ci_global = valid_indices[canonical_idx]
+            can_label = labels[ci_global]
+            can_id = rows[ci_global][0]
+
+            for mi in members[1:]:
+                di_global = valid_indices[mi]
+                dup_label = labels[di_global]
+                dup_id = rows[di_global][0]
+
+                cos_score = float(sim[canonical_idx, mi]) if canonical_idx < len(sim) and mi < len(sim[0]) else -1.0
+                jac_score = float(jaccard_sim[canonical_idx, mi]) if canonical_idx < len(jaccard_sim) and mi < len(jaccard_sim[0]) else -1.0
+                
+                if cos_score >= threshold:
+                    method = "cosine"
+                elif jac_score >= string_threshold:
+                    method = "jaccard"
+                else:
+                    method = "transitive"
+
+                dry_merges.append({
+                    "canonical": can_id,
+                    "canonical_label": can_label,
+                    "duplicate": dup_id,
+                    "duplicate_label": dup_label,
+                    "method": method,
+                    "cosine_similarity": round(cos_score, 4),
+                    "jaccard_similarity": round(jac_score, 4),
+                })
+
+                log("dedup", f"  [WOULD MERGE] '{dup_id}' -> '{can_id}' ({method}, cos={cos_score:.4f}, jac={jac_score:.4f})")
+
+        return {
+            "dry_run": True,
+            "would_merge": total_merged_dry,
+            "would_clusters": len(multi_clusters),
+            "merges": dry_merges,
+        }
 
     # ── Step 5: Merge each cluster ──────────────────────────────────
     total_merged = 0
@@ -4103,6 +4152,7 @@ def main() -> int:
                        help="Cosine similarity threshold for clustering (default: 0.95)")
     sp_gd.add_argument("--string-threshold", type=float, default=0.66,
                        help="Jaccard similarity threshold for string-based matching (default: 0.66)")
+    sp_gd.add_argument("--dry-run", action="store_true", help="Only preview merges without applying them")
     sp_gd.add_argument("--json", action="store_true", help="Output report as JSON")
 
     # graph deduplicate-rels (relationship-level, fact conflict resolution)
@@ -4226,17 +4276,21 @@ def main() -> int:
                 sys.exit(1)
             threshold = getattr(args, "threshold", 0.95)
             string_threshold = getattr(args, "string_threshold", 0.5)
+            dry_run = getattr(args, "dry_run", False)
             as_json = getattr(args, "json", False)
             conn = sqlite3.connect(DB_PATH)
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute("PRAGMA journal_mode = WAL")
             init_db(conn)
-            report = deduplicate_entities(conn, threshold=threshold, string_threshold=string_threshold)
+            report = deduplicate_entities(conn, threshold=threshold, string_threshold=string_threshold, dry_run=dry_run)
             conn.close()
             if as_json:
                 print(json.dumps(report, indent=2, ensure_ascii=False))
             else:
-                log("info", f"Entity deduplication complete (cosine_threshold={threshold}, jaccard_threshold={string_threshold})")
+                if dry_run:
+                    log("info", f"[DRY RUN] Would merge {report.get('would_merge', 0)} entities in {report.get('would_clusters', 0)} clusters")
+                else:
+                    log("info", f"Entity deduplication complete (cosine_threshold={threshold}, jaccard_threshold={string_threshold})")
                 log("info", f"  Entities loaded: {report.get('entities_loaded', '?')}")
                 log("info", f"  Embeddable: {report.get('embeddable', '?')}")
                 log("info", f"  Clusters: {report.get('clusters', 0)}")
