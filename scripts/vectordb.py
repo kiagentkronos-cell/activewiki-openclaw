@@ -1290,7 +1290,7 @@ class _UnionFind:
 def deduplicate_entities(
     conn: sqlite3.Connection,
     threshold: float = 0.95,
-    string_threshold: float = 0.5,
+    string_threshold: float = 0.66,
 ) -> dict[str, Any]:
     """Hybrid entity deduplication: embedding + string-based matching.
 
@@ -1347,8 +1347,9 @@ def deduplicate_entities(
     sim = _cosine_matrix(valid_vecs)
 
     # ── Step 3.5: Pairwise Jaccard similarity (string-based) ────────
-    # Build entity_type lookup for same-type check
+    # Build entity_type lookup and token set cache for same-type + min-token checks
     valid_types = [rows[i][2] for i in valid_indices]  # entity_type per valid index
+    valid_token_sets = [_normalize_label_for_jaccard(labels[idx]) for idx in valid_indices]
     jaccard_sim = np.zeros((len(valid_vecs), len(valid_vecs)), dtype=np.float64)
     for i in range(len(valid_vecs)):
         for j in range(i + 1, len(valid_vecs)):
@@ -1366,7 +1367,10 @@ def deduplicate_entities(
             if sim[i, j] >= threshold:
                 matched = True
                 pair_count_cosine += 1
-            elif jaccard_sim[i, j] >= string_threshold and valid_types[i] == valid_types[j]:
+            elif (jaccard_sim[i, j] >= string_threshold
+                  and valid_types[i] == valid_types[j]
+                  and len(valid_token_sets[i]) >= 2 and len(valid_token_sets[j]) >= 2
+                  and len(valid_token_sets[i] & valid_token_sets[j]) >= 2):
                 matched = True
                 pair_count_jaccard += 1
             if matched:
@@ -1535,14 +1539,14 @@ def _resolve_by_embedding(
     label: str,
     entity_type: str,
     threshold: float = 0.92,
-    string_threshold: float = 0.5,
+    string_threshold: float = 0.75,
     _cache: dict[str, np.ndarray] | None = None,
 ) -> str | None:
     """Try to find an existing entity by embedding similarity, with Jaccard fallback.
 
     Two-stage matching:
       1. Embedding-based cosine similarity (same type only)
-      2. Jaccard token overlap (same type only, for cases where embeddings diverge)
+      2. Jaccard token overlap (same type only, min 2 shared tokens, min 2 total tokens)
 
     Returns the canonical entity id if a match is found, or None.
 
@@ -1622,10 +1626,21 @@ def _resolve_by_embedding(
         log("warn", f"  [embed-dedup] embedding failed for '{label}': {e}")
 
     # ── Stage 2: Jaccard fallback (string-based, same type) ──────────
+    # Require min 2 shared tokens AND min 2 total tokens per label (avoid merging single words)
+    new_tokens = _normalize_label_for_jaccard(label)
+    if len(new_tokens) < 2:
+        return None  # single-word labels must rely on embedding or exact match
+
     best_jaccard = 0.0
     best_jaccard_id = None
 
     for eid, e_label in candidates:
+        existing_tokens = _normalize_label_for_jaccard(e_label)
+        if len(existing_tokens) < 2:
+            continue  # skip single-word existing labels for Jaccard match
+        shared = len(new_tokens & existing_tokens)
+        if shared < 2:
+            continue  # need at least 2 shared tokens to avoid false merges
         jac = _jaccard_similarity(label, e_label)
         if jac > best_jaccard:
             best_jaccard = jac
@@ -4086,8 +4101,8 @@ def main() -> int:
     sp_gd = graph_sub.add_parser("deduplicate", help="Embedding-based entity deduplication (merge semantic duplicates)")
     sp_gd.add_argument("--threshold", type=float, default=0.95,
                        help="Cosine similarity threshold for clustering (default: 0.95)")
-    sp_gd.add_argument("--string-threshold", type=float, default=0.5,
-                       help="Jaccard similarity threshold for string-based matching (default: 0.5)")
+    sp_gd.add_argument("--string-threshold", type=float, default=0.66,
+                       help="Jaccard similarity threshold for string-based matching (default: 0.66)")
     sp_gd.add_argument("--json", action="store_true", help="Output report as JSON")
 
     # graph deduplicate-rels (relationship-level, fact conflict resolution)
