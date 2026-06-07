@@ -1139,16 +1139,28 @@ def _cleanup_orphaned_relationships(conn: sqlite3.Connection) -> int:
 # ── String-based Similarity Helpers (Hybrid Match) ────────────────────────
 # Stopwords for Jaccard: German articles, conjunctions, prepositions
 # NOTE: Stored in normalized form (ae/oe/ue, no umlauts) to match _normalize_label_for_jaccard output
-# ── String-based Similarity Helpers (Hybrid Match) ────────────────────────
-# Stopwords for Jaccard: German articles, conjunctions, prepositions
-# NOTE: Stored in normalized form (ae/oe/ue, no umlauts) to match _normalize_label_for_jaccard output
 _STOPWORDS_JACCARD = frozenset({
     # Articles
     "der", "die", "das", "ein", "eine", "einer", "eines", "einem", "einen",
     "des", "dem", "den", "derselbe", "dieselbe", "dasselbe",
+    # Conjunctions
+    "und", "oder", "aber", "doch", "sowie", "beziehungsweise",
+    # Prepositions
+    "von", "zum", "zur", "im", "am", "an", "auf", "bei", "in", "mit",
+    "nach", "neben", "ohne", "unter", "ueber", "vor", "zwischen", "durch",
+    "gegen", "hinter", "innerhalb", "außerhalb", "seit", "waehrend",
+    # Common filler
+    "ist", "sind", "war", "wurde", "hat", "haben", "wird", "werden",
+    "auch", "noch", "mehr", "nur", "sehr", "wie", "was", "wo",
+    # Building type prefixes (don't change core identity)
+    "haus", "gebaeude", "einfamilienhaus", "mehrfamilienhaus", "wohnhaus",
+    "gewerbepark", "buero", "bueros", "lokal", "lokale", "raum", "raeume",
+    "villa", "hof", "hofanlage", "anlage", "objekt", "immobilie",
+    "grundstueck", "grundstuecke", "parzelle", "parzellen",
+    "wohnung", "wohnungen", "appartment", "appartement",
+})
 
 
-# ── Address Extraction Utility ─────────────────────────────────────────────
 def _extract_address(label: str) -> tuple[str, str] | None:
     """Extract street name + house number from an entity label.
 
@@ -1187,28 +1199,6 @@ def _extract_address(label: str) -> tuple[str, str] | None:
             return (street_name, house_number)
 
     return None
-
-
-_STOPWORDS_JACCARD = frozenset({
-    # Articles
-    "der", "die", "das", "ein", "eine", "einer", "eines", "einem", "einen",
-    "des", "dem", "den", "derselbe", "dieselbe", "dasselbe",
-    # Conjunctions
-    "und", "oder", "aber", "doch", "sowie", "beziehungsweise",
-    # Prepositions
-    "von", "zum", "zur", "im", "am", "an", "auf", "bei", "in", "mit",
-    "nach", "neben", "ohne", "unter", "ueber", "vor", "zwischen", "durch",
-    "gegen", "hinter", "innerhalb", "außerhalb", "seit", "waehrend",
-    # Common filler
-    "ist", "sind", "war", "wurde", "hat", "haben", "wird", "werden",
-    "auch", "noch", "mehr", "nur", "sehr", "wie", "was", "wo",
-    # Building type prefixes (don't change core identity)
-    "haus", "gebaeude", "einfamilienhaus", "mehrfamilienhaus", "wohnhaus",
-    "gewerbepark", "buero", "bueros", "lokal", "lokale", "raum", "raeume",
-    "villa", "hof", "hofanlage", "anlage", "objekt", "immobilie",
-    "grundstueck", "grundstuecke", "parzelle", "parzellen",
-    "wohnung", "wohnungen", "appartment", "appartement",
-})
 
 
 def _normalize_label_for_jaccard(label: str) -> set[str]:
@@ -2290,7 +2280,7 @@ def _ollama_extract(text: str, known_entities_text: str | None = None) -> Dict[s
     for attempt in range(RETRY_MAX):
         try:
             req = urllib.request.Request(
-                f"{VLLM_URL}/v1/chat/completions",
+                f"{VLLM_URL}/chat/completions",
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
             )
@@ -2379,7 +2369,7 @@ def _vllm_health_check() -> bool:
     """Quick health check: is vLLM reachable (needed for extraction + summaries)?"""
     try:
         req = urllib.request.Request(
-            f"{VLLM_URL}/v1/models",
+            f"{VLLM_URL}/models",
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -2893,7 +2883,7 @@ Erstelle Label und Summary als JSON."""
     for attempt in range(RETRY_MAX):
         try:
             req = urllib.request.Request(
-                f"{VLLM_URL}/v1/chat/completions",
+                f"{VLLM_URL}/chat/completions",
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
             )
