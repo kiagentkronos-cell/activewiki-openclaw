@@ -41,6 +41,33 @@ openclaw plugins install --link .
 
 Done. Your agent now searches your wiki in every response.
 
+## Features
+
+### Semantic Vector Search
+- Embed all wiki documents using Ollama (bge-m3)
+- Automatic chunking with Docling for PDFs and DOCX files
+- Over-fetching with relevance scoring for optimal context window usage
+
+### Knowledge Graph
+- **Entity extraction** from documents via LLM (OpenAI) — automatically identifies people, places, organizations, and concepts
+- **Relationship mapping** — entities are connected by typed, directed relationships (has_parent_object, part_of_project, owned_by, etc.)
+- **Confidence tags** — every relationship carries a confidence level (confirmed, inferred, uncertain) reflecting how reliably it was extracted
+- **Rationale entities** — the "why" behind connections is preserved as traceable rationale nodes
+- **Community detection** — Louvain algorithm identifies clusters of related entities (e.g., "Musterort real estate cluster", "Heimserver home automation cluster")
+- **Interactive HTML visualization** — explore the graph visually with D3.js: filter by type, search entities, adjust zoom, export as PNG/SVG
+
+### Entity Resolution (Deduplication)
+- **Hybrid matching** — cosine similarity (embeddings) + Jaccard string similarity (token overlap) catches duplicates that pure semantic similarity misses
+- **Prevention** — new entities from LLM extraction are checked against existing ones before insertion (soft-delete with `valid_until`)
+- **Batch deduplication** — retroactively clean existing graphs: `vectordb.py graph deduplicate`
+- **Dry-run mode** — preview merges before applying: `--dry-run` flag shows what would be merged without changing anything
+- **Transitive clustering** — Union-Find algorithm ensures A→B→C chains are resolved into single canonical entities
+
+### Active Memory Integration
+- OpenClaw plugin automatically injects wiki hits into every LLM response
+- Scope-gated results (private/family/public) based on user authorization
+- Hybrid search: vector hits bridge to graph entities for combined context
+
 ## Full Documentation
 
 See [`plugin/README.md`](plugin/README.md) for complete reference documentation including all configuration options, pipeline phases, installation steps, troubleshooting, and FAQ.

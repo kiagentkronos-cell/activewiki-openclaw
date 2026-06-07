@@ -1139,6 +1139,56 @@ def _cleanup_orphaned_relationships(conn: sqlite3.Connection) -> int:
 # ── String-based Similarity Helpers (Hybrid Match) ────────────────────────
 # Stopwords for Jaccard: German articles, conjunctions, prepositions
 # NOTE: Stored in normalized form (ae/oe/ue, no umlauts) to match _normalize_label_for_jaccard output
+# ── String-based Similarity Helpers (Hybrid Match) ────────────────────────
+# Stopwords for Jaccard: German articles, conjunctions, prepositions
+# NOTE: Stored in normalized form (ae/oe/ue, no umlauts) to match _normalize_label_for_jaccard output
+_STOPWORDS_JACCARD = frozenset({
+    # Articles
+    "der", "die", "das", "ein", "eine", "einer", "eines", "einem", "einen",
+    "des", "dem", "den", "derselbe", "dieselbe", "dasselbe",
+
+
+# ── Address Extraction Utility ─────────────────────────────────────────────
+def _extract_address(label: str) -> tuple[str, str] | None:
+    """Extract street name + house number from an entity label.
+
+    Returns (street_name_normalized, house_number) or None if not address-like.
+
+    Examples:
+      "Haus Musterstrasse 32" -> ("musterstrasse", "32")
+      "Musterort Beispielstrasse 12a" -> ("beispielstrasse", "12a")
+      "DHH Nr. 4, Beispielstrasse 12" -> ("beispielstrasse", "12")
+      "Altgebaeude Hauptstr. 23" -> ("hauptstr", "23")
+    """
+    import re as _re
+
+    normalized = label.lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
+    normalized = normalized.replace("str.", "strasse").replace("straße", "strasse")
+
+    match = _re.search(r"([a-z][-a-z]*)\s+(\d+[a-z]?)\s*$", normalized)
+    if match:
+        street_name = match.group(1).strip()
+        house_number = match.group(2).strip()
+
+        non_street_words = frozenset({
+            "haus", "gebaeude", "einfamilienhaus", "mehrfamilienhaus",
+            "wohnhaus", "villa", "hof", "objekt", "immobilie",
+            "grundstueck", "wohnung", "anwesen", "gelände", "dhh",
+        })
+
+        parts = normalized.split()
+        if street_name in non_street_words and len(parts) > 2:
+            for k in range(len(parts) - 2, -1, -1):
+                if parts[k] not in non_street_words and len(parts[k]) > 2:
+                    street_name = parts[k]
+                    break
+
+        if len(street_name) > 2:
+            return (street_name, house_number)
+
+    return None
+
+
 _STOPWORDS_JACCARD = frozenset({
     # Articles
     "der", "die", "das", "ein", "eine", "einer", "eines", "einem", "einen",
