@@ -9,3 +9,6 @@ node_modules/
 knowledge-graph.md
 
 # Local config examples (ship separately or in docs)
+
+# Backups
+*.bak

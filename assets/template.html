@@ -86,7 +86,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 <!-- Tooltip -->
 <div id="tooltip"></div>
 
-<script src="https://d3js.org/d3.v7.min.js"><\/script>
+<script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 (function() {
   // ── Data ──────────────────────────────────────────────────────
@@ -95,7 +95,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
     d.linkCount = d.linkCount || 0;
     return d;
   });
-  const links = data.links.slice();
+  const links = data.links.map(function(l) {
+    return { source: l.source_id, target: l.target_id, relation_type: l.relation_type || '', confidence: l.confidence || '' };
+  });
 
   // ── Color map ─────────────────────────────────────────────────
   var nodeColors = {
@@ -468,6 +470,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
   });
 
 })();
-<\/script>
+</script>
 </body>
 </html>

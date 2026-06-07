@@ -1,0 +1,48 @@
+diff --git a/scripts/vectordb.py b/scripts/vectordb.py
+index 079010a..71fde8f 100755
+--- a/scripts/vectordb.py
++++ b/scripts/vectordb.py
+@@ -203,6 +203,7 @@ HTML_GRAPH_MAX_NODES = 200
+ HTML_GRAPH_MAX_EDGES = 500
+ _D3_LOCAL_PATH = Path(__file__).parent.parent / "assets" / "d3.v7.min.js"
+ _GRAPH_OUTPUT_DIR = Path(__file__).parent.parent / "output"
++_HTML_TEMPLATE_PATH = Path(__file__).parent.parent / "assets" / "template.html"
+ 
+ 
+ # ═══════════════════════════════════════════════════════════════════════
+@@ -3098,36 +3099,22 @@ def _build_graph_data(
+     return entities, relationships
+ 
+ 
+-def _read_d3_script() -> str:
+-    """Read the local D3.js minified script.
+-
+-    Raises SystemExit if the file is missing.
+-    """
+-    if not _D3_LOCAL_PATH.exists():
+-        raise SystemExit(
+-            f"D3.js file not found: {_D3_LOCAL_PATH}. "
+-            "Download d3.v7.min.js to assets/"
+-        )
+-    return _D3_LOCAL_PATH.read_text(encoding="utf-8")
+-
+ 
+ def _generate_html_graph(
+     query: str,
+     nodes_json: str,
+     links_json: str,
+-    d3_script: str,
+     has_private: bool = False,
+ ) -> str:
+-    """Generate a static HTML graph file and return its path.
++    """Generate an interactive HTML graph file and return its path.
+
+     Applies hard limits, writes the file, and sets restrictive permissions.
+-    The HTML template is a placeholder — replaced in a later step.
++    The HTML template is loaded from assets/template.html.
+
+     Args:
+         query: The original search query (used for filename).
+         nodes_json: JSON string of node data.
+         links_json: JSON string of link data.
+-        d3_script: Raw D3.js JavaScript source.

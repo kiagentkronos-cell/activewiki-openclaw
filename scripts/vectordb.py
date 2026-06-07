@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+import html
 import json
 import math
 import os
@@ -1074,6 +1075,12 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.commit()
         _record_graph_migration(conn, "v4_relationships_confidence")
 
+    # Add valid_until column to entities if not present (soft-delete for entity dedup)
+    if not _has_column(conn, "entities", "valid_until"):
+        conn.execute("ALTER TABLE entities ADD COLUMN valid_until TEXT DEFAULT NULL")
+        conn.commit()
+        _record_graph_migration(conn, "v5_entities_valid_until")
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Graph: Facts Cleanup (Dedup + Orphan Removal)
@@ -1127,6 +1134,356 @@ def _cleanup_orphaned_relationships(conn: sqlite3.Connection) -> int:
                AND valid_until IS NULL
     """).rowcount
     return affected
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Entity Deduplication (Embedding-Based)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _embed_entity_labels(labels: list[str]) -> np.ndarray:
+    """Batch-embed entity labels, returning L2-normalized float32 vectors.
+
+    Returns a (len(labels), EMBED_DIMS) array. Zero vectors for any
+    individual embedding failures so the caller can detect them.
+    """
+    if not labels:
+        return np.zeros((0, EMBED_DIMS), dtype=np.float32)
+    return embed(labels)
+
+
+def _cosine_matrix(A: np.ndarray) -> np.ndarray:
+    """Pairwise cosine similarity matrix for rows of A (already L2-normalized).
+
+    Returns (N, N) float64 matrix where M[i,j] = cosine(A[i], A[j]).
+    """
+    return (A @ A.T).astype(np.float64)
+
+
+class _UnionFind:
+    """Minimal Union-Find for clustering."""
+
+    def __init__(self, n: int) -> None:
+        self.parent = list(range(n))
+        self.rank = [0] * n
+
+    def find(self, x: int) -> int:
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]  # path compression
+            x = self.parent[x]
+        return x
+
+    def union(self, a: int, b: int) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return
+        if self.rank[ra] < self.rank[rb]:
+            ra, rb = rb, ra
+        self.parent[rb] = ra
+        if self.rank[ra] == self.rank[rb]:
+            self.rank[ra] += 1
+
+    def clusters(self) -> dict[int, list[int]]:
+        groups: dict[int, list[int]] = {}
+        for i in range(len(self.parent)):
+            root = self.find(i)
+            groups.setdefault(root, []).append(i)
+        return groups
+
+
+def deduplicate_entities(
+    conn: sqlite3.Connection,
+    threshold: float = 0.95,
+) -> dict[str, Any]:
+    """Embedding-based entity deduplication (after-the-fact cleanup).
+
+    1. Load all active entities and their labels.
+    2. Batch-embed the labels.
+    3. Compute pairwise cosine similarity.
+    4. Union-Find clustering above *threshold*.
+    5. For each cluster with >1 entity: pick canonical (most links),
+       redirect all relationship pointers, soft-delete duplicates.
+
+    Returns a report dict with counts and merge details.
+    """
+    # ── Step 1: Load active entities ────────────────────────────────
+    rows = conn.execute(
+        "SELECT id, label, entity_type, description FROM entities WHERE valid_until IS NULL"
+    ).fetchall()
+
+    if len(rows) < 2:
+        return {"entities_loaded": len(rows), "clusters": 0, "merged": 0, "redirects": 0}
+
+    ids = [r[0] for r in rows]
+    labels = [r[1] for r in rows]
+
+    log("dedup", f"Loaded {len(rows)} active entities for embedding-based dedup")
+
+    # ── Step 2: Batch-embed labels ──────────────────────────────────
+    try:
+        vecs = _embed_entity_labels(labels)
+    except Exception as e:
+        log("error", f"Entity embedding failed: {e}", stderr=True)
+        return {"error": str(e)}
+
+    # Drop zero-norm rows (embedding failures) — they can't match anything
+    valid_mask = np.linalg.norm(vecs, axis=1) > 0
+    valid_indices = [i for i in range(len(rows)) if valid_mask[i]]
+    valid_vecs = vecs[valid_mask]
+    valid_ids = [ids[i] for i in valid_indices]
+    valid_id_to_local = {eid: li for li, eid in enumerate(valid_ids)}
+
+    if len(valid_vecs) < 2:
+        return {
+            "entities_loaded": len(rows),
+            "embeddable": len(valid_vecs),
+            "clusters": 0,
+            "merged": 0,
+            "redirects": 0,
+        }
+
+    log("dedup", f"Embedded {len(valid_vecs)}/{len(rows)} labels (skipped {len(rows) - len(valid_vecs)} zero-norm)")
+
+    # ── Step 3: Pairwise cosine similarity ──────────────────────────
+    sim = _cosine_matrix(valid_vecs)
+
+    # ── Step 4: Union-Find clustering ───────────────────────────────
+    uf = _UnionFind(len(valid_vecs))
+    pair_count = 0
+    for i in range(len(valid_vecs)):
+        for j in range(i + 1, len(valid_vecs)):
+            if sim[i, j] >= threshold:
+                uf.union(i, j)
+                pair_count += 1
+
+    clusters = uf.clusters()
+    multi_clusters = {root: members for root, members in clusters.items() if len(members) > 1}
+
+    if not multi_clusters:
+        log("dedup", f"No clusters above threshold {threshold:.2f} (checked {pair_count} pairs)")
+        return {
+            "entities_loaded": len(rows),
+            "embeddable": len(valid_vecs),
+            "pairs_above_threshold": pair_count,
+            "clusters": 0,
+            "merged": 0,
+            "redirects": 0,
+        }
+
+    log("dedup", f"Found {len(multi_clusters)} clusters above threshold {threshold:.2f}")
+
+    # ── Step 5: Merge each cluster ──────────────────────────────────
+    total_merged = 0
+    total_redirects = 0
+    merge_report: list[dict] = []
+
+    for root, members in multi_clusters.items():
+        member_ids = [valid_ids[m] for m in members]
+
+        # Pick canonical: entity with most active relationships
+        link_counts = conn.execute(
+            "SELECT e.id, COUNT(r.id) AS cnt "
+            "FROM entities e "
+            "LEFT JOIN relationships r "
+            "  ON (r.source_id = e.id OR r.target_id = e.id) "
+            "  AND r.valid_until IS NULL "
+            "WHERE e.id IN (" + ",".join("?" * len(member_ids)) + ") "
+            "GROUP BY e.id",
+            member_ids,
+        ).fetchall()
+
+        # Canonical = most links; tie-break by oldest (lowest ROWID)
+        canonical_id = max(
+            member_ids,
+            key=lambda eid: (
+                next((cnt for eid2, cnt in link_counts if eid2 == eid), 0),
+                -conn.execute("SELECT ROWID FROM entities WHERE id = ?", (eid,)).fetchone()[0],
+            ),
+        )
+
+        duplicates = [eid for eid in member_ids if eid != canonical_id]
+
+        if not duplicates:
+            continue
+
+        canonical_row = conn.execute(
+            "SELECT label, entity_type, description FROM entities WHERE id = ?",
+            (canonical_id,),
+        ).fetchone()
+        canonical_label = canonical_row[0]
+
+        for dup_id in duplicates:
+            dup_row = conn.execute(
+                "SELECT label, entity_type, description FROM entities WHERE id = ?",
+                (dup_id,),
+            ).fetchone()
+            dup_label = dup_row[0]
+
+            # Redirect relationships: source
+            src_redirect = conn.execute(
+                "UPDATE relationships SET source_id = ? WHERE source_id = ? AND valid_until IS NULL",
+                (canonical_id, dup_id),
+            ).rowcount
+
+            # Redirect relationships: target
+            tgt_redirect = conn.execute(
+                "UPDATE relationships SET target_id = ? WHERE target_id = ? AND valid_until IS NULL",
+                (canonical_id, dup_id),
+            ).rowcount
+
+            total_redirects += src_redirect + tgt_redirect
+
+            # Merge descriptions into canonical
+            if dup_row[2] and canonical_row[2] and dup_row[2] != canonical_row[2]:
+                merged_desc = _merge_description(canonical_row[2], dup_row[2])
+                conn.execute(
+                    "UPDATE entities SET description = ?, updated_at = datetime('now') WHERE id = ?",
+                    (merged_desc, canonical_id),
+                )
+
+            # Soft-delete the duplicate
+            conn.execute(
+                "UPDATE entities SET valid_until = datetime('now') WHERE id = ?",
+                (dup_id,),
+            )
+            total_merged += 1
+
+            # Get similarity score for report
+            if canonical_id in valid_id_to_local and dup_id in valid_id_to_local:
+                ci = valid_id_to_local[canonical_id]
+                di = valid_id_to_local[dup_id]
+                sim_score = float(sim[ci, di])
+            else:
+                sim_score = -1.0
+
+            merge_report.append({
+                "canonical": canonical_id,
+                "canonical_label": canonical_label,
+                "duplicate": dup_id,
+                "duplicate_label": dup_label,
+                "similarity": round(sim_score, 4),
+                "redirects": src_redirect + tgt_redirect,
+            })
+
+            log("dedup",
+                f"  [merge] '{dup_label}' → '{canonical_label}' "
+                f"(sim={sim_score:.4f}, redirects={src_redirect + tgt_redirect})")
+
+    conn.commit()
+
+    # Clean up orphaned relationships after entity soft-deletes
+    orphan_cleanup = _cleanup_orphaned_relationships(conn)
+    conn.commit()
+
+    report = {
+        "entities_loaded": len(rows),
+        "embeddable": len(valid_vecs),
+        "threshold": threshold,
+        "pairs_above_threshold": pair_count,
+        "clusters": len(multi_clusters),
+        "merged": total_merged,
+        "redirects": total_redirects,
+        "orphan_rels_cleaned": orphan_cleanup,
+        "merges": merge_report,
+    }
+    log("dedup", f"Done: {total_merged} entities merged, {total_redirects} relationships redirected")
+    return report
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Embedding-Based Entity Prevention (during extraction)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _resolve_by_embedding(
+    conn: sqlite3.Connection,
+    label: str,
+    entity_type: str,
+    threshold: float = 0.92,
+    _cache: dict[str, np.ndarray] | None = None,
+) -> str | None:
+    """Try to find an existing entity by embedding similarity.
+
+    Computes the embedding of *label*, compares against all active
+    entities (same type preferred). Returns the canonical entity id
+    if a match is found, or None.
+
+    Called as Priority 3.5 in resolve_entity(), between label NOCASE
+    match and fuzzy match, to catch semantic duplicates that string
+    methods miss (e.g. 'Musterstraße 32' vs 'Haus Musterstraße 32').
+
+    Optimisation: batch-embeds all candidate labels in a single Ollama
+    call rather than N+1 individual calls. Uses *_cache* (shared across
+    calls within the same page) to avoid re-embedding the same existing
+    entities repeatedly.
+
+    Args:
+        _cache: Optional dict mapping label → embedding vector. Populated
+            on first call and reused for subsequent calls in the same
+            process_page() invocation. DO NOT pass from outside.
+    """
+    # Load same-type entities
+    same_type_rows = conn.execute(
+        "SELECT id, label FROM entities WHERE entity_type = ? AND valid_until IS NULL",
+        (entity_type,),
+    ).fetchall()
+
+    if not same_type_rows:
+        return None
+
+    # Filter out exact label match (handled earlier)
+    label_lower = label.lower()
+    candidates = [(eid, e_label) for eid, e_label in same_type_rows
+                   if e_label.lower() != label_lower]
+
+    if not candidates:
+        return None
+
+    # Build cache of existing entity embeddings (populate on first call)
+    if _cache is None:
+        _cache = {}
+    existing_labels = [e_label for _, e_label in candidates]
+    missing_labels = [l for l in existing_labels if l not in _cache]
+
+    if missing_labels:
+        try:
+            missing_vecs = embed(missing_labels)
+            for ml, mv in zip(missing_labels, missing_vecs):
+                if np.any(mv):
+                    _cache[ml] = mv
+        except Exception as e:
+            log("warn", f"  [embed-dedup] embedding failed for existing entities: {e}")
+            return None
+
+    # Embed the new label
+    try:
+        q_vec = embed([label])
+        if q_vec.size == 0 or not np.any(q_vec[0]):
+            return None
+    except Exception as e:
+        log("warn", f"  [embed-dedup] embedding failed for '{label}': {e}")
+        return None
+
+    q = q_vec[0]
+    best_score = 0.0
+    best_id = None
+
+    for eid, e_label in candidates:
+        e_vec = _cache.get(e_label)
+        if e_vec is None or not np.any(e_vec):
+            continue
+        sim = float(np.dot(q, e_vec) / (np.linalg.norm(q) * np.linalg.norm(e_vec)))
+        if sim > best_score:
+            best_score = sim
+            best_id = eid
+
+    if best_score >= threshold and best_id:
+        log("dedup",
+            f"  [embed-dedup] '{label}' → matched '{best_id}' "
+            f"(cosine={best_score:.4f}, threshold={threshold})")
+        return best_id
+
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1354,6 +1711,7 @@ def resolve_entity(
     description: str,
     wiki_page: str,
     registry: EntityRegistry | None = None,
+    _embed_cache: dict[str, np.ndarray] | None = None,
 ) -> str:
     """Check for existing similar entity. If found → update, else insert.
     Returns the canonical entity id.
@@ -1362,9 +1720,16 @@ def resolve_entity(
       1. Registry lookup (highest priority - authoritative mapping)
       2. ID exact match
       3. Label NOCASE exact match
+      3.5. Embedding-based match (catches semantic duplicates)
       4. Fuzzy match within same entity_type (threshold 85%)
       5. Cross-type fuzzy match (threshold 90%, first-write-wins on type)
       6. Insert as new entity
+
+    Args:
+        _embed_cache: Optional shared cache of existing entity embeddings.
+            Populated lazily and reused across calls within the same
+            process_page() invocation to avoid redundant embedding calls.
+            DO NOT pass from outside.
     """
 
     # ── Priority 1: Registry lookup ──────────────────────────────
@@ -1402,6 +1767,21 @@ def resolve_entity(
             (merged, eid),
         )
         return eid
+
+    # ── Priority 3.5: Embedding-based match (catches semantic dups) ──
+    embed_id = _resolve_by_embedding(conn, label, entity_type)
+    if embed_id:
+        existing_row = conn.execute(
+            "SELECT id, label, description FROM entities WHERE id = ?", (embed_id,)
+        ).fetchone()
+        if existing_row:
+            eid, _, old_desc = existing_row
+            merged = _merge_description(old_desc, description)
+            conn.execute(
+                "UPDATE entities SET description = ?, updated_at = datetime('now') WHERE id = ?",
+                (merged, eid),
+            )
+            return eid
 
     # ── Priority 4: Fuzzy match within same entity_type ──────────
     candidates = conn.execute(
@@ -3099,12 +3479,71 @@ def _build_graph_data(
     return entities, relationships
 
 
+def _build_full_graph_data(
+    db: sqlite3.Connection,
+    min_confidence: str | None = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Build the full graph — all active entities and relationships.
+
+    Args:
+        db: Open SQLite connection.
+        min_confidence: If set, filter relationships by confidence level.
+
+    Returns:
+        (entities_list, relationships_list) as plain Python lists of dicts.
+    """
+    # All active entities
+    entity_rows = db.execute(
+        "SELECT id, label, entity_type, COALESCE(description, '') FROM entities WHERE valid_until IS NULL"
+    ).fetchall()
+
+    # All active relationships
+    rel_where = "valid_until IS NULL"
+    if min_confidence and min_confidence in CONFIDENCE_ORDER:
+        min_val = CONFIDENCE_ORDER[min_confidence]
+        rel_where += (
+            f" AND CASE confidence WHEN 'extracted' THEN 3 WHEN 'inferred' THEN 2 ELSE 1 END >= {min_val}"
+        )
+
+    rel_rows = db.execute(
+        f"SELECT source_id, target_id, relation_type, COALESCE(confidence, '{DEFAULT_CONFIDENCE}') "
+        f"FROM relationships WHERE {rel_where}"
+    ).fetchall()
+
+    # Count linkCount per entity and build relationship list
+    link_counts: dict[str, int] = {}
+    relationships = []
+    for src, tgt, rtype, conf in rel_rows:
+        relationships.append({
+            "source_id": src,
+            "target_id": tgt,
+            "relation_type": rtype,
+            "confidence": conf,
+        })
+        link_counts[src] = link_counts.get(src, 0) + 1
+        link_counts[tgt] = link_counts.get(tgt, 0) + 1
+
+    # Build entity list with linkCount
+    entities = []
+    for eid, label, etype, desc in entity_rows:
+        entities.append({
+            "id": eid,
+            "label": label,
+            "type": etype,
+            "description": desc[:500],
+            "linkCount": link_counts.get(eid, 0),
+        })
+
+    return entities, relationships
+
+
 
 def _generate_html_graph(
     query: str,
     nodes_json: str,
     links_json: str,
     has_private: bool = False,
+    skip_limits: bool = False,
 ) -> str:
     """Generate an interactive HTML graph file and return its path.
 
@@ -3126,16 +3565,17 @@ def _generate_html_graph(
     num_nodes = sum(1 for _ in nodes_json.split('"id":')) - 1
     num_edges = sum(1 for _ in links_json.split('"source_id":')) - 1
 
-    if num_nodes > HTML_GRAPH_MAX_NODES:
-        raise SystemExit(
-            f"Graph too large: {num_nodes} nodes (max {HTML_GRAPH_MAX_NODES}). "
-            "Use a more specific query."
-        )
-    if num_edges > HTML_GRAPH_MAX_EDGES:
-        raise SystemExit(
-            f"Graph too large: {num_edges} edges (max {HTML_GRAPH_MAX_EDGES}). "
-            "Use a more specific query."
-        )
+    if not skip_limits:
+        if num_nodes > HTML_GRAPH_MAX_NODES:
+            raise SystemExit(
+                f"Graph too large: {num_nodes} nodes (max {HTML_GRAPH_MAX_NODES}). "
+                "Use a more specific query."
+            )
+        if num_edges > HTML_GRAPH_MAX_EDGES:
+            raise SystemExit(
+                f"Graph too large: {num_edges} edges (max {HTML_GRAPH_MAX_EDGES}). "
+                "Use a more specific query."
+            )
 
     # Filename: graph_<md5(query)[:8]>.html
     query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:8]
@@ -3165,12 +3605,13 @@ def _generate_html_graph(
     return str(output_path)
 
 
-def cmd_graph_html(query: str, min_confidence: str | None = None) -> None:
+def cmd_graph_html(query: str, min_confidence: str | None = None, all_graph: bool = False) -> None:
     """Generate an interactive HTML graph for a query and print the output path.
 
     Args:
-        query: Text to search for seed entities.
+        query: Text to search for seed entities (None = full graph).
         min_confidence: Optional minimum confidence level for relationships.
+        all_graph: If True, include ALL entities/relationships regardless of limits.
     """
     if not _graph_has_tables():
         log(
@@ -3182,12 +3623,22 @@ def cmd_graph_html(query: str, min_confidence: str | None = None) -> None:
 
     conn = sqlite3.connect(DB_PATH)
     try:
-        entities, relationships = _build_graph_data(conn, query, min_confidence)
+        if all_graph:
+            # Full graph: no query, all entities + relationships
+            entities, relationships = _build_full_graph_data(conn, min_confidence)
+        else:
+            if not query:
+                log("error", " Query required for subgraph. Use --all for the full graph.", stderr=True)
+                sys.exit(1)
+            entities, relationships = _build_graph_data(conn, query, min_confidence)
     finally:
         conn.close()
 
     if not entities:
-        log("info", f"No entities matching '{query}'")
+        if all_graph:
+            log("info", "Graph is empty. Run `vectordb.py graph build` first.")
+        else:
+            log("info", f"No entities matching '{query}'")
         return
 
     nodes_json = json.dumps(entities, ensure_ascii=False)
@@ -3200,10 +3651,11 @@ def cmd_graph_html(query: str, min_confidence: str | None = None) -> None:
     )
 
     output_path = _generate_html_graph(
-        query=query,
+        query=query or "Full Graph",
         nodes_json=nodes_json,
         links_json=links_json,
         has_private=has_private,
+        skip_limits=all_graph,
     )
 
     print(output_path)
@@ -3476,8 +3928,14 @@ def main() -> int:
     # graph validate
     graph_sub.add_parser("validate", help="Validate graph integrity")
 
-    # graph deduplicate
-    graph_sub.add_parser("deduplicate", help="Deduplicate conflicting relationships (older → valid_until)")
+    # graph deduplicate (entity-level, embedding-based)
+    sp_gd = graph_sub.add_parser("deduplicate", help="Embedding-based entity deduplication (merge semantic duplicates)")
+    sp_gd.add_argument("--threshold", type=float, default=0.95,
+                       help="Cosine similarity threshold for clustering (default: 0.95)")
+    sp_gd.add_argument("--json", action="store_true", help="Output report as JSON")
+
+    # graph deduplicate-rels (relationship-level, fact conflict resolution)
+    graph_sub.add_parser("deduplicate-rels", help="Deduplicate conflicting relationships (older → valid_until)")
 
     # graph cleanup
     graph_sub.add_parser("cleanup", help="Clean up orphaned relationships (missing source/target)")
@@ -3518,7 +3976,14 @@ def main() -> int:
 
     # graph html
     sp_gh = graph_sub.add_parser("html", help="Export an interactive HTML graph")
-    sp_gh.add_argument("query", help="Search query to find seed entities")
+    sp_gh.add_argument("query", nargs="?", default=None, help="Search query to find seed entities (omit for full graph)")
+    sp_gh.add_argument(
+        "--all", "--full-graph",
+        action="store_true",
+        default=False,
+        dest="all_graph",
+        help="Include ALL entities and relationships (ignores hard limits)",
+    )
     sp_gh.add_argument(
         "--min-confidence",
         choices=["extracted", "inferred", "ambiguous"],
@@ -3588,6 +4053,31 @@ def main() -> int:
             if not DB_PATH.exists():
                 log("error", " Database not found. Run `vectordb.py graph build` first.", stderr=True)
                 sys.exit(1)
+            threshold = getattr(args, "threshold", 0.95)
+            as_json = getattr(args, "json", False)
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA journal_mode = WAL")
+            init_db(conn)
+            report = deduplicate_entities(conn, threshold=threshold)
+            conn.close()
+            if as_json:
+                print(json.dumps(report, indent=2, ensure_ascii=False))
+            else:
+                log("info", f"Entity deduplication complete (threshold={threshold})")
+                log("info", f"  Entities loaded: {report.get('entities_loaded', '?')}")
+                log("info", f"  Embeddable: {report.get('embeddable', '?')}")
+                log("info", f"  Clusters: {report.get('clusters', 0)}")
+                log("info", f"  Merged: {report.get('merged', 0)}")
+                log("info", f"  Redirects: {report.get('redirects', 0)}")
+                if report.get("merges"):
+                    log("info", f"  Merges:")
+                    for m in report["merges"]:
+                        log("info", f"    '{m['duplicate_label']}' → '{m['canonical_label']}' (sim={m['similarity']})")
+        elif gc == "deduplicate-rels":
+            if not DB_PATH.exists():
+                log("error", " Database not found. Run `vectordb.py graph build` first.", stderr=True)
+                sys.exit(1)
             conn = sqlite3.connect(DB_PATH)
             init_db(conn)
             deduped = _deduplicate_relationships(conn)
@@ -3631,7 +4121,8 @@ def main() -> int:
                 ap.print_help()
         elif gc == "html":
             min_conf = getattr(args, "min_confidence", None)
-            cmd_graph_html(args.query, min_confidence=min_conf)
+            all_flag = getattr(args, "all_graph", False)
+            cmd_graph_html(args.query, min_confidence=min_conf, all_graph=all_flag)
         else:
             ap.print_help()
 
