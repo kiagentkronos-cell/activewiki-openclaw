@@ -1136,8 +1136,104 @@ def _cleanup_orphaned_relationships(conn: sqlite3.Connection) -> int:
     return affected
 
 
+# ── String-based Similarity Helpers (Hybrid Match) ────────────────────────
+# Stopwords for Jaccard: German articles, conjunctions, prepositions
+# NOTE: Stored in normalized form (ae/oe/ue, no umlauts) to match _normalize_label_for_jaccard output
+_STOPWORDS_JACCARD = frozenset({
+    # Articles
+    "der", "die", "das", "ein", "eine", "einer", "eines", "einem", "einen",
+    "des", "dem", "den", "derselbe", "dieselbe", "dasselbe",
+    # Conjunctions
+    "und", "oder", "aber", "doch", "sowie", "beziehungsweise",
+    # Prepositions
+    "von", "zum", "zur", "im", "am", "an", "auf", "bei", "in", "mit",
+    "nach", "neben", "ohne", "unter", "ueber", "vor", "zwischen", "durch",
+    "gegen", "hinter", "innerhalb", "außerhalb", "seit", "waehrend",
+    # Common filler
+    "ist", "sind", "war", "wurde", "hat", "haben", "wird", "werden",
+    "auch", "noch", "mehr", "nur", "sehr", "wie", "was", "wo",
+    # Building type prefixes (don't change core identity)
+    "haus", "gebaeude", "einfamilienhaus", "mehrfamilienhaus", "wohnhaus",
+    "gewerbepark", "buero", "bueros", "lokal", "lokale", "raum", "raeume",
+    "villa", "hof", "hofanlage", "anlage", "objekt", "immobilie",
+    "grundstueck", "grundstuecke", "parzelle", "parzellen",
+    "wohnung", "wohnungen", "appartment", "appartement",
+})
+
+
+def _normalize_label_for_jaccard(label: str) -> set[str]:
+    """Normalize a label for Jaccard comparison: lowercase, remove stopwords, split into tokens."""
+    # Normalize umlauts and abbreviations
+    normalized = label.lower()
+    normalized = normalized.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
+    normalized = normalized.replace("ß", "ss")
+    # Normalize common abbreviations
+    normalized = normalized.replace("str.", "straße")
+    normalized = normalized.replace("strasse", "straße")
+    normalized = normalized.replace("nr.", "nummer")
+    # Tokenize: split on whitespace, punctuation, and special chars
+    tokens = re.findall(r"[a-zA-ZäöüÄÖÜß0-9]+", normalized)
+    # Remove stopwords and very short tokens
+    tokens = {t for t in tokens if t not in _STOPWORDS_JACCARD and len(t) > 1}
+    return tokens
+
+
+def _jaccard_similarity(a: str, b: str) -> float:
+    """Compute Jaccard similarity between two labels (0.0–1.0).
+
+    Normalizes both labels, removes stopwords, then computes
+    |intersection| / |union| of the resulting token sets.
+    """
+    set_a = _normalize_label_for_jaccard(a)
+    set_b = _normalize_label_for_jaccard(b)
+    if not set_a or not set_b:
+        return 0.0
+    intersection = set_a & set_b
+    union = set_a | set_b
+    return len(intersection) / len(union)
+
+
+def _longest_common_subsequence_ratio(a: str, b: str) -> float:
+    """Compute LCS ratio between two lowercased strings (0.0–1.0).
+
+    Uses dynamic programming on the lowercased, whitespace-normalized strings.
+    Returns 2 * LCS_length / (len(a) + len(b)).
+    """
+    sa = a.lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
+    sb = b.lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
+    # Normalize whitespace
+    sa = re.sub(r"\s+", " ", sa).strip()
+    sb = re.sub(r"\s+", " ", sb).strip()
+    la, lb = len(sa), len(sb)
+    if la == 0 or lb == 0:
+        return 0.0
+    # Cap length to avoid O(n²) blowup on very long labels
+    if la > 200 or lb > 200:
+        return 0.0
+    # Standard LCS DP
+    prev = [0] * (lb + 1)
+    for i in range(1, la + 1):
+        curr = [0] * (lb + 1)
+        for j in range(1, lb + 1):
+            if sa[i - 1] == sb[j - 1]:
+                curr[j] = prev[j - 1] + 1
+            else:
+                curr[j] = max(curr[j - 1], prev[j])
+        prev = curr
+    lcs_len = prev[lb]
+    return 2.0 * lcs_len / (la + lb)
+
+
+def _string_match_score(a: str, b: str) -> tuple[float, float]:
+    """Compute both Jaccard and LCS similarity between two labels.
+
+    Returns (jaccard_score, lcs_score), both in [0.0, 1.0].
+    """
+    return (_jaccard_similarity(a, b), _longest_common_subsequence_ratio(a, b))
+
+
 # ═══════════════════════════════════════════════════════════════════════
-#  Entity Deduplication (Embedding-Based)
+#  Entity Deduplication (Embedding-Based + Hybrid String Match)
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -1194,14 +1290,17 @@ class _UnionFind:
 def deduplicate_entities(
     conn: sqlite3.Connection,
     threshold: float = 0.95,
+    string_threshold: float = 0.5,
 ) -> dict[str, Any]:
-    """Embedding-based entity deduplication (after-the-fact cleanup).
+    """Hybrid entity deduplication: embedding + string-based matching.
 
     1. Load all active entities and their labels.
     2. Batch-embed the labels.
     3. Compute pairwise cosine similarity.
-    4. Union-Find clustering above *threshold*.
-    5. For each cluster with >1 entity: pick canonical (most links),
+    4. Compute pairwise Jaccard similarity (string-based).
+    5. Union-Find clustering: merge if cosine >= threshold
+       OR (jaccard >= string_threshold AND same entity_type).
+    6. For each cluster with >1 entity: pick canonical (most links),
        redirect all relationship pointers, soft-delete duplicates.
 
     Returns a report dict with counts and merge details.
@@ -1247,30 +1346,48 @@ def deduplicate_entities(
     # ── Step 3: Pairwise cosine similarity ──────────────────────────
     sim = _cosine_matrix(valid_vecs)
 
-    # ── Step 4: Union-Find clustering ───────────────────────────────
-    uf = _UnionFind(len(valid_vecs))
-    pair_count = 0
+    # ── Step 3.5: Pairwise Jaccard similarity (string-based) ────────
+    # Build entity_type lookup for same-type check
+    valid_types = [rows[i][2] for i in valid_indices]  # entity_type per valid index
+    jaccard_sim = np.zeros((len(valid_vecs), len(valid_vecs)), dtype=np.float64)
     for i in range(len(valid_vecs)):
         for j in range(i + 1, len(valid_vecs)):
+            jacc = _jaccard_similarity(labels[valid_indices[i]], labels[valid_indices[j]])
+            jaccard_sim[i, j] = jacc
+            jaccard_sim[j, i] = jacc
+
+    # ── Step 4: Union-Find clustering (hybrid: cosine OR jaccard+same_type) ──
+    uf = _UnionFind(len(valid_vecs))
+    pair_count_cosine = 0
+    pair_count_jaccard = 0
+    for i in range(len(valid_vecs)):
+        for j in range(i + 1, len(valid_vecs)):
+            matched = False
             if sim[i, j] >= threshold:
+                matched = True
+                pair_count_cosine += 1
+            elif jaccard_sim[i, j] >= string_threshold and valid_types[i] == valid_types[j]:
+                matched = True
+                pair_count_jaccard += 1
+            if matched:
                 uf.union(i, j)
-                pair_count += 1
 
     clusters = uf.clusters()
     multi_clusters = {root: members for root, members in clusters.items() if len(members) > 1}
 
     if not multi_clusters:
-        log("dedup", f"No clusters above threshold {threshold:.2f} (checked {pair_count} pairs)")
+        log("dedup", f"No clusters above thresholds (cosine={threshold:.2f}, jaccard={string_threshold:.2f})")
         return {
             "entities_loaded": len(rows),
             "embeddable": len(valid_vecs),
-            "pairs_above_threshold": pair_count,
+            "pairs_above_cosine_threshold": pair_count_cosine,
+            "pairs_above_jaccard_threshold": pair_count_jaccard,
             "clusters": 0,
             "merged": 0,
             "redirects": 0,
         }
 
-    log("dedup", f"Found {len(multi_clusters)} clusters above threshold {threshold:.2f}")
+    log("dedup", f"Found {len(multi_clusters)} clusters (cosine pairs={pair_count_cosine}, jaccard pairs={pair_count_jaccard})")
 
     # ── Step 5: Merge each cluster ──────────────────────────────────
     total_merged = 0
@@ -1348,26 +1465,42 @@ def deduplicate_entities(
             )
             total_merged += 1
 
-            # Get similarity score for report
+            # Get similarity scores for report
             if canonical_id in valid_id_to_local and dup_id in valid_id_to_local:
                 ci = valid_id_to_local[canonical_id]
                 di = valid_id_to_local[dup_id]
-                sim_score = float(sim[ci, di])
+                cos_score = float(sim[ci, di])
+                jac_score = float(jaccard_sim[ci, di])
             else:
-                sim_score = -1.0
+                cos_score = -1.0
+                jac_score = -1.0
+
+            # Determine match method
+            if cos_score >= threshold:
+                match_method = "cosine"
+                primary_score = cos_score
+            elif jac_score >= string_threshold:
+                match_method = "jaccard"
+                primary_score = jac_score
+            else:
+                match_method = "transitive"
+                primary_score = max(cos_score, jac_score)
 
             merge_report.append({
                 "canonical": canonical_id,
                 "canonical_label": canonical_label,
                 "duplicate": dup_id,
                 "duplicate_label": dup_label,
-                "similarity": round(sim_score, 4),
+                "cosine_similarity": round(cos_score, 4),
+                "jaccard_similarity": round(jac_score, 4),
+                "match_method": match_method,
+                "primary_score": round(primary_score, 4),
                 "redirects": src_redirect + tgt_redirect,
             })
 
             log("dedup",
                 f"  [merge] '{dup_label}' → '{canonical_label}' "
-                f"(sim={sim_score:.4f}, redirects={src_redirect + tgt_redirect})")
+                f"(method={match_method}, cos={cos_score:.4f}, jac={jac_score:.4f}, redirects={src_redirect + tgt_redirect})")
 
     conn.commit()
 
@@ -1378,8 +1511,10 @@ def deduplicate_entities(
     report = {
         "entities_loaded": len(rows),
         "embeddable": len(valid_vecs),
-        "threshold": threshold,
-        "pairs_above_threshold": pair_count,
+        "cosine_threshold": threshold,
+        "jaccard_threshold": string_threshold,
+        "pairs_above_cosine_threshold": pair_count_cosine,
+        "pairs_above_jaccard_threshold": pair_count_jaccard,
         "clusters": len(multi_clusters),
         "merged": total_merged,
         "redirects": total_redirects,
@@ -1400,13 +1535,16 @@ def _resolve_by_embedding(
     label: str,
     entity_type: str,
     threshold: float = 0.92,
+    string_threshold: float = 0.5,
     _cache: dict[str, np.ndarray] | None = None,
 ) -> str | None:
-    """Try to find an existing entity by embedding similarity.
+    """Try to find an existing entity by embedding similarity, with Jaccard fallback.
 
-    Computes the embedding of *label*, compares against all active
-    entities (same type preferred). Returns the canonical entity id
-    if a match is found, or None.
+    Two-stage matching:
+      1. Embedding-based cosine similarity (same type only)
+      2. Jaccard token overlap (same type only, for cases where embeddings diverge)
+
+    Returns the canonical entity id if a match is found, or None.
 
     Called as Priority 3.5 in resolve_entity(), between label NOCASE
     match and fuzzy match, to catch semantic duplicates that string
@@ -1439,7 +1577,7 @@ def _resolve_by_embedding(
     if not candidates:
         return None
 
-    # Build cache of existing entity embeddings (populate on first call)
+    # ── Stage 1: Embedding-based matching ────────────────────────────
     if _cache is None:
         _cache = {}
     existing_labels = [e_label for _, e_label in candidates]
@@ -1453,35 +1591,51 @@ def _resolve_by_embedding(
                     _cache[ml] = mv
         except Exception as e:
             log("warn", f"  [embed-dedup] embedding failed for existing entities: {e}")
-            return None
+            # Fall through to Jaccard below
 
     # Embed the new label
     try:
         q_vec = embed([label])
         if q_vec.size == 0 or not np.any(q_vec[0]):
-            return None
+            # Embedding failed — fall through to Jaccard
+            pass
+        else:
+            q = q_vec[0]
+            best_score = 0.0
+            best_id = None
+
+            for eid, e_label in candidates:
+                e_vec = _cache.get(e_label)
+                if e_vec is None or not np.any(e_vec):
+                    continue
+                sim = float(np.dot(q, e_vec) / (np.linalg.norm(q) * np.linalg.norm(e_vec)))
+                if sim > best_score:
+                    best_score = sim
+                    best_id = eid
+
+            if best_score >= threshold and best_id:
+                log("dedup",
+                    f"  [embed-dedup] '{label}' → matched '{best_id}' "
+                    f"(cosine={best_score:.4f}, threshold={threshold})")
+                return best_id
     except Exception as e:
         log("warn", f"  [embed-dedup] embedding failed for '{label}': {e}")
-        return None
 
-    q = q_vec[0]
-    best_score = 0.0
-    best_id = None
+    # ── Stage 2: Jaccard fallback (string-based, same type) ──────────
+    best_jaccard = 0.0
+    best_jaccard_id = None
 
     for eid, e_label in candidates:
-        e_vec = _cache.get(e_label)
-        if e_vec is None or not np.any(e_vec):
-            continue
-        sim = float(np.dot(q, e_vec) / (np.linalg.norm(q) * np.linalg.norm(e_vec)))
-        if sim > best_score:
-            best_score = sim
-            best_id = eid
+        jac = _jaccard_similarity(label, e_label)
+        if jac > best_jaccard:
+            best_jaccard = jac
+            best_jaccard_id = eid
 
-    if best_score >= threshold and best_id:
+    if best_jaccard >= string_threshold and best_jaccard_id:
         log("dedup",
-            f"  [embed-dedup] '{label}' → matched '{best_id}' "
-            f"(cosine={best_score:.4f}, threshold={threshold})")
-        return best_id
+            f"  [jaccard-dedup] '{label}' → matched '{best_jaccard_id}' "
+            f"(jaccard={best_jaccard:.4f}, threshold={string_threshold})")
+        return best_jaccard_id
 
     return None
 
@@ -1769,7 +1923,7 @@ def resolve_entity(
         return eid
 
     # ── Priority 3.5: Embedding-based match (catches semantic dups) ──
-    embed_id = _resolve_by_embedding(conn, label, entity_type)
+    embed_id = _resolve_by_embedding(conn, label, entity_type, _cache=_embed_cache)
     if embed_id:
         existing_row = conn.execute(
             "SELECT id, label, description FROM entities WHERE id = ?", (embed_id,)
@@ -3932,6 +4086,8 @@ def main() -> int:
     sp_gd = graph_sub.add_parser("deduplicate", help="Embedding-based entity deduplication (merge semantic duplicates)")
     sp_gd.add_argument("--threshold", type=float, default=0.95,
                        help="Cosine similarity threshold for clustering (default: 0.95)")
+    sp_gd.add_argument("--string-threshold", type=float, default=0.5,
+                       help="Jaccard similarity threshold for string-based matching (default: 0.5)")
     sp_gd.add_argument("--json", action="store_true", help="Output report as JSON")
 
     # graph deduplicate-rels (relationship-level, fact conflict resolution)
@@ -4054,17 +4210,18 @@ def main() -> int:
                 log("error", " Database not found. Run `vectordb.py graph build` first.", stderr=True)
                 sys.exit(1)
             threshold = getattr(args, "threshold", 0.95)
+            string_threshold = getattr(args, "string_threshold", 0.5)
             as_json = getattr(args, "json", False)
             conn = sqlite3.connect(DB_PATH)
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute("PRAGMA journal_mode = WAL")
             init_db(conn)
-            report = deduplicate_entities(conn, threshold=threshold)
+            report = deduplicate_entities(conn, threshold=threshold, string_threshold=string_threshold)
             conn.close()
             if as_json:
                 print(json.dumps(report, indent=2, ensure_ascii=False))
             else:
-                log("info", f"Entity deduplication complete (threshold={threshold})")
+                log("info", f"Entity deduplication complete (cosine_threshold={threshold}, jaccard_threshold={string_threshold})")
                 log("info", f"  Entities loaded: {report.get('entities_loaded', '?')}")
                 log("info", f"  Embeddable: {report.get('embeddable', '?')}")
                 log("info", f"  Clusters: {report.get('clusters', 0)}")
@@ -4073,7 +4230,8 @@ def main() -> int:
                 if report.get("merges"):
                     log("info", f"  Merges:")
                     for m in report["merges"]:
-                        log("info", f"    '{m['duplicate_label']}' → '{m['canonical_label']}' (sim={m['similarity']})")
+                        log("info", f"    '{m['duplicate_label']}' → '{m['canonical_label']}' "
+                            f"(method={m['match_method']}, cos={m['cosine_similarity']}, jac={m['jaccard_similarity']})")
         elif gc == "deduplicate-rels":
             if not DB_PATH.exists():
                 log("error", " Database not found. Run `vectordb.py graph build` first.", stderr=True)
