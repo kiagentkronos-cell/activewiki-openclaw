@@ -1118,6 +1118,84 @@ def build_prompt_rollup(
     return "\n".join(parts)
 
 
+# JSON Schemas (structured outputs)
+
+_SCHEMA_DISTILL_PAGE = {
+    'type': 'json_schema',
+    'json_schema': {
+        'name': 'wiki_update',
+        'strict': False,
+        'schema': {
+            'type': 'object',
+            'properties': {
+                'type': {'type': 'string', 'enum': ['create', 'update']},
+                'slug': {'type': 'string'},
+                'title': {'type': 'string'},
+                'summary': {'type': 'string'},
+                'topics': {'type': 'array', 'items': {'type': 'string'}},
+                'content_md': {'type': 'string'},
+            },
+            'required': ['type', 'slug', 'title', 'summary', 'topics', 'content_md'],
+            'additionalProperties': False,
+            '$schema': 'http://json-schema.org/draft-07/schema#',
+        },
+    },
+}
+
+_SCHEMA_LEGACY = {
+    'type': 'json_schema',
+    'json_schema': {
+        'name': 'wiki_chunk_legacy',
+        'strict': False,
+        'schema': {
+            'type': 'object',
+            'properties': {
+                'actions': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'type': {'type': 'string', 'enum': ['create', 'update']},
+                            'slug': {'type': 'string'},
+                            'title': {'type': 'string'},
+                            'summary': {'type': 'string'},
+                            'topics': {'type': 'array', 'items': {'type': 'string'}},
+                            'content_md': {'type': 'string'},
+                        },
+                        'required': ['type', 'slug', 'title', 'summary', 'topics', 'content_md'],
+                        'additionalProperties': False,
+                        '$schema': 'http://json-schema.org/draft-07/schema#',
+                    },
+                },
+            },
+            'required': ['actions'],
+            'additionalProperties': False,
+            '$schema': 'http://json-schema.org/draft-07/schema#',
+        },
+    },
+}
+
+_SCHEMA_ROLLUP = {
+    'type': 'json_schema',
+    'json_schema': {
+        'name': 'wiki_rollup',
+        'strict': False,
+        'schema': {
+            'type': 'object',
+            'properties': {
+                'slug': {'type': 'string'},
+                'title': {'type': 'string'},
+                'summary': {'type': 'string'},
+                'topics': {'type': 'array', 'items': {'type': 'string'}},
+                'content_md': {'type': 'string'},
+            },
+            'required': ['slug', 'title', 'summary', 'topics', 'content_md'],
+            'additionalProperties': False,
+            '$schema': 'http://json-schema.org/draft-07/schema#',
+        },
+    },
+}
+
 # ── LLM Client ──────────────────────────────────────────────────────────────
 
 class SourceSkipped(Exception):
@@ -1131,6 +1209,7 @@ def call_llm(
     user: str,
     *,
     source_id: str | None = None,
+    json_schema_override: dict | None = None,
 ) -> dict[str, Any]:
     """Call the LLM API and parse the JSON response.
 
@@ -1152,42 +1231,7 @@ def call_llm(
                 ],
                 "temperature": llm_temperature(_CONFIG),
                 "max_tokens": 65536,
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "wiki_response",
-                        "strict": False,
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "type": {"type": "string", "enum": ["create", "update"]},
-                                "slug": {"type": "string"},
-                                "title": {"type": "string"},
-                                "summary": {"type": "string"},
-                                "topics": {"type": "array", "items": {"type": "string"}},
-                                "content_md": {"type": "string"},
-                                "actions": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "type": {"type": "string"},
-                                            "slug": {"type": "string"},
-                                            "title": {"type": "string"},
-                                            "summary": {"type": "string"},
-                                            "topics": {"type": "array", "items": {"type": "string"}},
-                                            "content_md": {"type": "string"},
-                                            "related_slugs": {"type": "array", "items": {"type": "string"}}
-                                        },
-                                        "additionalProperties": True
-                                    }
-                                },
-                                "_rollup_slug_": {"type": ["string", "null"]}
-                            },
-                            "additionalProperties": True
-                        }
-                    }
-                },
+                "response_format": json_schema_override or _SCHEMA_DISTILL_PAGE,
                 "chat_template_kwargs": {"enable_thinking": False},
             }
             req = urllib.request.Request(
@@ -1668,6 +1712,7 @@ def distill_source(
         result = call_llm(
             SYSTEM_PROMPT_DISTILL_LEGACY, prompt,
             source_id=source_id,
+            json_schema_override=_SCHEMA_LEGACY,
         )
         actions = result.get("actions") or []
 
@@ -1874,7 +1919,7 @@ def rollup_folder(
         f"{scope}/{folder_slug} "
         f"({child_count} child page(s), {source_count} direct source(s))")
 
-    result = call_llm(SYSTEM_PROMPT_ROLLUP, prompt, source_id=f"rollup:{folder_slug}")
+    result = call_llm(SYSTEM_PROMPT_ROLLUP, prompt, source_id=f"rollup:{folder_slug}", json_schema_override=_SCHEMA_ROLLUP)
 
     # FIX #10: Always use folder_slug as canonical slug — prevents LLM drift
     # from creating zombie pages with different names each run.
