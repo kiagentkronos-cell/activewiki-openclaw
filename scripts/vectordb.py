@@ -203,6 +203,7 @@ HTML_GRAPH_MAX_NODES = 200
 HTML_GRAPH_MAX_EDGES = 500
 _D3_LOCAL_PATH = Path(__file__).parent.parent / "assets" / "d3.v7.min.js"
 _GRAPH_OUTPUT_DIR = Path(__file__).parent.parent / "output"
+_HTML_TEMPLATE_PATH = Path(__file__).parent.parent / "assets" / "template.html"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -3098,36 +3099,22 @@ def _build_graph_data(
     return entities, relationships
 
 
-def _read_d3_script() -> str:
-    """Read the local D3.js minified script.
-
-    Raises SystemExit if the file is missing.
-    """
-    if not _D3_LOCAL_PATH.exists():
-        raise SystemExit(
-            f"D3.js file not found: {_D3_LOCAL_PATH}. "
-            "Download d3.v7.min.js to assets/"
-        )
-    return _D3_LOCAL_PATH.read_text(encoding="utf-8")
-
 
 def _generate_html_graph(
     query: str,
     nodes_json: str,
     links_json: str,
-    d3_script: str,
     has_private: bool = False,
 ) -> str:
-    """Generate a static HTML graph file and return its path.
+    """Generate an interactive HTML graph file and return its path.
 
     Applies hard limits, writes the file, and sets restrictive permissions.
-    The HTML template is a placeholder — replaced in a later step.
+    The HTML template is loaded from assets/template.html.
 
     Args:
         query: The original search query (used for filename).
         nodes_json: JSON string of node data.
         links_json: JSON string of link data.
-        d3_script: Raw D3.js JavaScript source.
         has_private: Whether the graph contains private-scope entities.
 
     Returns:
@@ -3155,33 +3142,22 @@ def _generate_html_graph(
     _GRAPH_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = _GRAPH_OUTPUT_DIR / f"graph_{query_hash}.html"
 
-    # Placeholder template — will be replaced with real D3 template later
-    banner = "\n<!-- CONFIDENTIAL: Contains private wiki data -->\n" if has_private else ""
-    html_template = (
-        "<!DOCTYPE html>\n"
-        '<html lang="en">\n<head>\n'
-        "<meta charset=\"utf-8\">\n"
-        "<title>ActiveWiki Graph — {query}</title>\n"
-        "{banner}"
-        "</head>\n<body>\n"
-        "<div id=\"graph\"></div>\n"
-        "<script>\n"
-        "// D3.js will be injected here\n"
-        "{d3_script}\n"
-        "</script>\n"
-        "<script>\n"
-        "const nodes = {nodes_json};\n"
-        "const links = {links_json};\n"
-        "// Graph rendering logic goes here (Phase 2C)\n"
-        "</script>\n"
-        "</body>\n</html>"
-    )
+    # Load template from file
+    if not _HTML_TEMPLATE_PATH.exists():
+        raise SystemExit(f"HTML template not found: {_HTML_TEMPLATE_PATH}")
+    template_text = _HTML_TEMPLATE_PATH.read_text(encoding="utf-8")
 
-    html_content = html_template.replace("{query}", query)
-    html_content = html_content.replace("{banner}", banner)
-    html_content = html_content.replace("{d3_script}", d3_script)
-    html_content = html_content.replace("{nodes_json}", nodes_json)
-    html_content = html_content.replace("{links_json}", links_json)
+    # Build combined data JSON
+    data_json = json.dumps({
+        "nodes": json.loads(nodes_json),
+        "links": json.loads(links_json),
+    }, ensure_ascii=False)
+
+    # Replace template variables
+    title_safe = html.escape(query)
+    html_content = template_text.replace("{{TITLE}}", f"ActiveWiki Graph — {title_safe}")
+    html_content = html_content.replace("{{DATA_JSON}}", data_json)
+    html_content = html_content.replace("{{HAS_PRIVATE}}", "true" if has_private else "false")
 
     output_path.write_text(html_content, encoding="utf-8")
     os.chmod(str(output_path), 0o600)
@@ -3223,13 +3199,10 @@ def cmd_graph_html(query: str, min_confidence: str | None = None) -> None:
         for e in entities
     )
 
-    d3_script = _read_d3_script()
-
     output_path = _generate_html_graph(
         query=query,
         nodes_json=nodes_json,
         links_json=links_json,
-        d3_script=d3_script,
         has_private=has_private,
     )
 

@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>{{TITLE}}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0d1117;color:#c9d1d9;overflow:hidden}
+#banner{position:fixed;top:0;left:0;right:0;height:28px;background:#da3633;color:#fff;display:none;align-items:center;justify-content:center;font-size:12px;font-weight:bold;z-index:1000}
+#header{position:fixed;top:28px;left:0;right:0;height:44px;background:#161b22;border-bottom:1px solid #30363d;display:flex;align-items:center;padding:0 16px;gap:12px;z-index:999}
+#header h1{font-size:14px;font-weight:600;color:#58a6ff}
+.header-stats{font-size:12px;color:#8b949e;margin-left:auto}
+#search-input{background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 8px;border-radius:4px;font-size:12px;width:200px;outline:none}
+#search-input:focus{border-color:#58a6ff}
+#graph-container{width:100vw;height:100vh;margin-top:72px}
+#sidebar{position:fixed;right:0;top:72px;bottom:0;width:340px;background:#161b22;border-left:1px solid #30363d;padding:16px;transform:translateX(100%);transition:transform .2s ease;overflow-y:auto;z-index:998}
+#sidebar.visible{transform:translateX(0)}
+.close-sidebar-btn{position:absolute;top:8px;right:8px;width:24px;height:24px;background:none;border:none;color:#8b949e;font-size:20px;cursor:pointer;border-radius:4px;line-height:1}
+.close-sidebar-btn:hover{background:rgba(255,255,255,.05);color:#c9d1d9}
+.sidebar-section-title{font-size:11px;text-transform:uppercase;color:#8b949e;margin-top:16px;margin-bottom:8px;letter-spacing:.5px}
+.sidebar-section-title:first-child{margin-top:0!important}
+.type-badge-PERSON{background:rgba(88,166,255,.15);color:#58a6ff}
+.type-badge-ADDRESS{background:rgba(63,185,80,.15);color:#3fb950}
+.type-badge-PROPERTY{background:rgba(240,136,62,.15);color:#f0883e}
+.type-badge-ORGANIZATION{background:rgba(163,113,247,.15);color:#a371f7}
+.type-badge-RATIONALE{background:rgba(247,120,186,.15);color:#f778ba}
+.sidebar-link-label{color:#c9d1d9;font-size:14px;margin-bottom:4px;line-height:1.4}
+
+/* Confidence badges */
+.confidence-extracted{background:rgba(63,185,80,.15);color:#3fb950;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600}
+.confidence-inferred{background:rgba(240,136,62,.15);color:#f0883e;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600}
+.confidence-assumed{background:rgba(139,148,158,.15);color:#8b949e;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600}
+
+/* Link styling */
+.link-line{stroke:#30363d;stroke-width:1.5;fill:none}
+.link-line.highlighted{stroke:#58a6ff;stroke-width:2.5}
+.link-line.dimmed{stroke-opacity:.08}
+
+/* Node circles */
+.node-circle{stroke:#0d1117;stroke-width:2;cursor:pointer;transition:stroke-width .15s ease}
+.node-circle:hover{stroke-width:3}
+.node-circle.highlighted{stroke:#fff;stroke-width:3}
+.node-circle.dimmed{opacity:.12}
+
+/* Node labels */
+.node-label{font-size:10px;fill:#c9d1d9;pointer-events:none;text-shadow:0 0 4px #0d1117,0 0 4px #0d1117}
+.node-label.highlighted{fill:#fff;font-weight:600}
+.node-label.dimmed{opacity:.12}
+
+/* Link labels (shown on hover) */
+.link-label{font-size:9px;fill:#8b949e;pointer-events:none;opacity:0;transition:opacity .15s ease;text-anchor:middle}
+.link-label.visible{opacity:1}
+
+/* Tooltip */
+#tooltip{position:fixed;background:#1c2128;border:1px solid #30363d;border-radius:6px;padding:8px 12px;font-size:12px;color:#c9d1d9;pointer-events:none;z-index:1001;max-width:280px;box-shadow:0 4px 12px rgba(0,0,0,.4);display:none}
+#tooltip .tt-label{font-weight:600;color:#58a6ff;margin-bottom:4px}
+#tooltip .tt-desc{color:#8b949e;font-size:11px;line-height:1.4}
+
+/* Sidebar relation item */
+.sidebar-relation-item{padding:6px 8px;margin-bottom:4px;background:rgba(255,255,255,.03);border-radius:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sidebar-relation-item .relation-arrow{color:#8b949e;font-size:12px;flex-shrink:0}
+.sidebar-relation-item .relation-type{font-size:10px;color:#8b949e;flex-shrink:0}
+</style>
+</head>
+<body>
+
+<!-- Confidential Banner -->
+<div id="banner">⚠ CONFIDENTIAL — Contains private data</div>
+
+<!-- Header -->
+<div id="header">
+  <h1 id="page-title">{{TITLE}}</h1>
+  <input type="text" id="search-input" placeholder="Search nodes &amp; relations…" />
+  <span class="header-stats" id="header-stats"></span>
+</div>
+
+<!-- Graph -->
+<div id="graph-container"></div>
+
+<!-- Sidebar -->
+<div id="sidebar">
+  <button class="close-sidebar-btn" id="close-sidebar">&times;</button>
+  <div id="sidebar-content"></div>
+</div>
+
+<!-- Tooltip -->
+<div id="tooltip"></div>
+
+<script src="https://d3js.org/d3.v7.min.js"><\/script>
+<script>
+(function() {
+  // ── Data ──────────────────────────────────────────────────────
+  const data = {{DATA_JSON}};
+  const nodes = data.nodes.map(function(d) {
+    d.linkCount = d.linkCount || 0;
+    return d;
+  });
+  const links = data.links.slice();
+
+  // ── Color map ─────────────────────────────────────────────────
+  var nodeColors = {
+    PERSON:       "#58a6ff",
+    ADDRESS:      "#3fb950",
+    PROPERTY:     "#f0883e",
+    ORGANIZATION: "#a371f7",
+    RATIONALE:    "#f778ba",
+    DEFAULT:      "#8b949e"
+  };
+
+  function nodeColor(type) {
+    return nodeColors[type] || nodeColors.DEFAULT;
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────
+  function escapeHtml(str) {
+    if (!str) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  // ── Banner ────────────────────────────────────────────────────
+  if ({{HAS_PRIVATE}} === true) {
+    document.getElementById("banner").style.display = "flex";
+  }
+
+  // ── Stats ─────────────────────────────────────────────────────
+  document.getElementById("header-stats").textContent =
+    nodes.length + " nodes · " + links.length + " links";
+
+  // ── Dimensions ────────────────────────────────────────────────
+  var width  = window.innerWidth;
+  var height = window.innerHeight - 72;
+
+  // ── SVG ───────────────────────────────────────────────────────
+  var svg = d3.select("#graph-container")
+    .append("svg")
+    .attr("width", width)
+    .attr("height", height)
+    .attr("viewBox", [0, 0, width, height]);
+
+  // Arrow marker
+  svg.append("defs").append("marker")
+    .attr("id", "arrow")
+    .attr("viewBox", "0 -5 10 10")
+    .attr("refX", 28)
+    .attr("refY", 0)
+    .attr("markerWidth", 6)
+    .attr("markerHeight", 6)
+    .attr("orient", "auto")
+    .append("path")
+    .attr("d", "M0,-5L10,0L0,5")
+    .attr("fill", "#30363d");
+
+  var zoomGroup = svg.append("g");
+
+  // Zoom / Pan
+  var zoom = d3.zoom()
+    .scaleExtent([0.15, 6])
+    .on("zoom", function(event) {
+      zoomGroup.attr("transform", event.transform);
+    });
+
+  svg.call(zoom);
+  svg.on("dblclick.zoom", null); // disable double-click zoom
+
+  // ── Force Simulation ──────────────────────────────────────────
+  var simulation = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(function(d) { return d.id; }).distance(120))
+    .force("charge", d3.forceManyBody().strength(-320))
+    .force("center", d3.forceCenter(width / 2, height / 2))
+    .force("collision", d3.forceCollide().radius(function(d) { return nodeRadius(d) + 8; }))
+    .force("x", d3.forceX(width / 2).strength(0.06))
+    .force("y", d3.forceY(height / 2).strength(0.06));
+
+  function nodeRadius(d) {
+    return Math.sqrt(d.linkCount) * 4 + 5;
+  }
+
+  // ── Render Links ──────────────────────────────────────────────
+  var linkLines = zoomGroup.selectAll(".link-line")
+    .data(links)
+    .enter()
+    .append("line")
+    .attr("class", "link-line")
+    .attr("marker-end", "url(#arrow)");
+
+  // Link labels (hidden by default)
+  var linkLabels = zoomGroup.selectAll(".link-label")
+    .data(links)
+    .enter()
+    .append("text")
+    .attr("class", "link-label")
+    .text(function(d) { return d.relation_type || ""; });
+
+  // ── Render Nodes ──────────────────────────────────────────────
+  var nodeGroup = zoomGroup.selectAll(".node-group")
+    .data(nodes)
+    .enter()
+    .append("g")
+    .attr("class", "node-group")
+    .call(d3.drag()
+      .on("start", dragStarted)
+      .on("drag", dragged)
+      .on("end", dragEnded));
+
+  nodeGroup.append("circle")
+    .attr("class", "node-circle")
+    .attr("r", function(d) { return nodeRadius(d); })
+    .attr("fill", function(d) { return nodeColor(d.type); });
+
+  nodeGroup.append("text")
+    .attr("class", "node-label")
+    .attr("dx", function(d) { return nodeRadius(d) + 6; })
+    .attr("dy", "0.35em")
+    .text(function(d) { return d.label; });
+
+  // ── Interactions ──────────────────────────────────────────────
+  var selectedNodeId = null;
+
+  nodeGroup.on("click", function(event, d) {
+    event.stopPropagation();
+    selectedNodeId = d.id;
+    highlightNode(d);
+    showSidebar(d);
+  });
+
+  nodeGroup.on("mouseover", function(event, d) {
+    highlightNode(d);
+    showLinkLabels(true);
+    showTooltip(event, d);
+  });
+
+  nodeGroup.on("mouseout", function() {
+    unhighlight();
+    showLinkLabels(false);
+    hideTooltip();
+  });
+
+  svg.on("click", function() {
+    selectedNodeId = null;
+    unhighlight();
+    hideSidebar();
+  });
+
+  function highlightNode(d) {
+    var connectedIds = new Set();
+    connectedIds.add(d.id);
+
+    links.forEach(function(l) {
+      var sid = l.source_id || l.source;
+      var tid = l.target_id || l.target;
+      if (sid === d.id) connectedIds.add(tid);
+      if (tid === d.id) connectedIds.add(sid);
+    });
+
+    nodeGroup.select(".node-circle")
+      .classed("dimmed", function(n) { return !connectedIds.has(n.id); })
+      .classed("highlighted", function(n) { return n.id === d.id; });
+
+    nodeGroup.select(".node-label")
+      .classed("dimmed", function(n) { return !connectedIds.has(n.id); })
+      .classed("highlighted", function(n) { return n.id === d.id; });
+
+    linkLines
+      .classed("dimmed", function(l) {
+        var sid = l.source_id || l.source;
+        var tid = l.target_id || l.target;
+        return !(sid === d.id || tid === d.id);
+      })
+      .classed("highlighted", function(l) {
+        var sid = l.source_id || l.source;
+        var tid = l.target_id || l.target;
+        return sid === d.id || tid === d.id;
+      });
+  }
+
+  function unhighlight() {
+    nodeGroup.select(".node-circle").classed("dimmed", false).classed("highlighted", false);
+    nodeGroup.select(".node-label").classed("dimmed", false).classed("highlighted", false);
+    linkLines.classed("dimmed", false).classed("highlighted", false);
+  }
+
+  function showLinkLabels(show) {
+    linkLabels.classed("visible", show);
+  }
+
+  // ── Tooltip ───────────────────────────────────────────────────
+  var tooltipEl = document.getElementById("tooltip");
+
+  function showTooltip(event, d) {
+    var html = '<div class="tt-label">' + escapeHtml(d.label) + '</div>';
+    if (d.description) {
+      html += '<div class="tt-desc">' + escapeHtml(d.description) + '</div>';
+    }
+    tooltipEl.innerHTML = html;
+    tooltipEl.style.display = "block";
+    tooltipEl.style.left = (event.pageX + 14) + "px";
+    tooltipEl.style.top  = (event.pageY + 14) + "px";
+  }
+
+  function hideTooltip() {
+    tooltipEl.style.display = "none";
+  }
+
+  // ── Sidebar ───────────────────────────────────────────────────
+  var sidebarEl   = document.getElementById("sidebar");
+  var sidebarCont = document.getElementById("sidebar-content");
+
+  document.getElementById("close-sidebar").addEventListener("click", hideSidebar);
+
+  function showSidebar(d) {
+    var outgoing = links.filter(function(l) {
+      return (l.source_id || l.source) === d.id;
+    });
+    var incoming = links.filter(function(l) {
+      return (l.target_id || l.target) === d.id;
+    });
+
+    var html = '';
+
+    // Title + badge
+    html += '<div class="sidebar-link-label" style="font-size:18px;font-weight:600;margin-bottom:6px;">';
+    html += escapeHtml(d.label);
+    html += ' <span class="type-badge-' + escapeHtml(d.type) + '" style="font-size:11px;">' + escapeHtml(d.type) + '</span>';
+    html += '</div>';
+
+    // Description
+    if (d.description) {
+      html += '<div style="font-size:12px;color:#8b949e;margin-bottom:12px;line-height:1.5;">' + escapeHtml(d.description) + '</div>';
+    }
+
+    // Outgoing
+    if (outgoing.length > 0) {
+      html += '<div class="sidebar-section-title">Outgoing Relations</div>';
+      outgoing.forEach(function(l) {
+        var tid = l.target_id || l.target;
+        var targetNode = nodes.find(function(n) { return n.id === tid; });
+        var targetLabel = targetNode ? targetNode.label : tid;
+        var confClass = l.confidence ? 'confidence-' + l.confidence : '';
+        html += '<div class="sidebar-relation-item">';
+        html += '<span class="relation-arrow">→</span>';
+        html += '<span class="sidebar-link-label">' + escapeHtml(targetLabel) + '</span>';
+        html += '<span class="type-badge-' + escapeHtml(targetNode ? targetNode.type : 'DEFAULT') + '" style="font-size:10px;">' + escapeHtml(targetNode ? targetNode.type : '??') + '</span>';
+        html += '<span class="relation-type">[' + escapeHtml(l.relation_type || '') + ']</span>';
+        if (confClass) html += '<span class="' + confClass + '">' + escapeHtml(l.confidence) + '</span>';
+        html += '</div>';
+      });
+    }
+
+    // Incoming
+    if (incoming.length > 0) {
+      html += '<div class="sidebar-section-title">Incoming Relations</div>';
+      incoming.forEach(function(l) {
+        var sid = l.source_id || l.source;
+        var sourceNode = nodes.find(function(n) { return n.id === sid; });
+        var sourceLabel = sourceNode ? sourceNode.label : sid;
+        var confClass = l.confidence ? 'confidence-' + l.confidence : '';
+        html += '<div class="sidebar-relation-item">';
+        html += '<span class="relation-arrow">←</span>';
+        html += '<span class="sidebar-link-label">' + escapeHtml(sourceLabel) + '</span>';
+        html += '<span class="type-badge-' + escapeHtml(sourceNode ? sourceNode.type : 'DEFAULT') + '" style="font-size:10px;">' + escapeHtml(sourceNode ? sourceNode.type : '??') + '</span>';
+        html += '<span class="relation-type">[' + escapeHtml(l.relation_type || '') + ']</span>';
+        if (confClass) html += '<span class="' + confClass + '">' + escapeHtml(l.confidence) + '</span>';
+        html += '</div>';
+      });
+    }
+
+    sidebarCont.innerHTML = html;
+    sidebarEl.classList.add("visible");
+  }
+
+  function hideSidebar() {
+    sidebarEl.classList.remove("visible");
+  }
+
+  // ── Drag ──────────────────────────────────────────────────────
+  function dragStarted(event, d) {
+    if (!event.active) simulation.alphaTarget(0.3).restart();
+    d.fx = d.x;
+    d.fy = d.y;
+  }
+
+  function dragged(event, d) {
+    d.fx = event.x;
+    d.fy = event.y;
+  }
+
+  function dragEnded(event, d) {
+    if (!event.active) simulation.alphaTarget(0);
+    d.fx = null;
+    d.fy = null;
+  }
+
+  // ── Tick ──────────────────────────────────────────────────────
+  simulation.on("tick", function() {
+    linkLines
+      .attr("x1", function(d) { return d.source.x; })
+      .attr("y1", function(d) { return d.source.y; })
+      .attr("x2", function(d) { return d.target.x; })
+      .attr("y2", function(d) { return d.target.y; });
+
+    linkLabels
+      .attr("x", function(d) { return (d.source.x + d.target.x) / 2; })
+      .attr("y", function(d) { return (d.source.y + d.target.y) / 2 - 6; });
+
+    nodeGroup.attr("transform", function(d) { return "translate(" + d.x + "," + d.y + ")"; });
+  });
+
+  // ── Search ────────────────────────────────────────────────────
+  var searchInput = document.getElementById("search-input");
+  searchInput.addEventListener("input", function() {
+    var q = searchInput.value.trim().toLowerCase();
+    if (!q) {
+      unhighlight();
+      return;
+    }
+
+    var matchIds = new Set();
+    nodes.forEach(function(n) {
+      if (n.label.toLowerCase().indexOf(q) !== -1 ||
+          (n.description && n.description.toLowerCase().indexOf(q) !== -1) ||
+          (n.type && n.type.toLowerCase().indexOf(q) !== -1)) {
+        matchIds.add(n.id);
+      }
+    });
+
+    links.forEach(function(l) {
+      if (l.relation_type && l.relation_type.toLowerCase().indexOf(q) !== -1) {
+        matchIds.add(l.source_id || l.source);
+        matchIds.add(l.target_id || l.target);
+      }
+    });
+
+    nodeGroup.select(".node-circle")
+      .classed("dimmed", function(n) { return !matchIds.has(n.id); })
+      .classed("highlighted", function(n) { return matchIds.has(n.id); });
+
+    nodeGroup.select(".node-label")
+      .classed("dimmed", function(n) { return !matchIds.has(n.id); })
+      .classed("highlighted", function(n) { return matchIds.has(n.id); });
+
+    linkLines
+      .classed("dimmed", function(l) {
+        var sid = l.source_id || l.source;
+        var tid = l.target_id || l.target;
+        return !(matchIds.has(sid) && matchIds.has(tid));
+      })
+      .classed("highlighted", function(l) {
+        var sid = l.source_id || l.source;
+        var tid = l.target_id || l.target;
+        return matchIds.has(sid) && matchIds.has(tid);
+      });
+  });
+
+  // ── Resize ────────────────────────────────────────────────────
+  window.addEventListener("resize", function() {
+    width  = window.innerWidth;
+    height = window.innerHeight - 72;
+    svg.attr("width", width).attr("height", height).attr("viewBox", [0, 0, width, height]);
+    simulation.force("center", d3.forceCenter(width / 2, height / 2));
+    simulation.force("x", d3.forceX(width / 2).strength(0.06));
+    simulation.force("y", d3.forceY(height / 2).strength(0.06));
+    simulation.alpha(0.3).restart();
+  });
+
+})();
+<\/script>
+</body>
+</html>
