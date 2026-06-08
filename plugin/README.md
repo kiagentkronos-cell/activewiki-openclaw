@@ -124,6 +124,28 @@ activewiki/
 
 ---
 
+## 4. Dependencies
+
+### Python Packages
+
+**Required for all scripts:**
+```bash
+pip install numpy
+```
+
+**Optional (recommended):**
+```bash
+# Community Detection (igraph)
+pip install python-igraph
+
+# Docling OCR (PDF/Images/DOCX → Markdown)
+pip install docling
+```
+
+**Note:** `run_inbox.sh` uses a Python venv specified in `ocr.venv_path` (see `activewiki.json`). The venv must contain both `docling` AND `igraph` for community detection to work.
+
+---
+
 ## 3. Configuration
 
 ### activewiki.json
