@@ -128,21 +128,24 @@ activewiki/
 
 ### Python Packages
 
-**Required for all scripts:**
+| Package | Where used | Purpose |
+|---------|------------|---------|
+| **numpy** | `vectordb.py` | Cosine similarity, matrix operations |
+| **python-igraph** | `vectordb.py` | Community detection (Leiden algorithm) |
+| **PyYAML** (`yaml`) | `vectordb.py`, `distill.py`, `split_pages.py` | YAML serialization |
+| **docling** | `ingest.py` | Document ingestion (PDF/Images/DOCX → Markdown) |
+
+**Minimal install (embedding + search only):**
 ```bash
-pip install numpy
+pip install numpy pyyaml
 ```
 
-**Optional (recommended):**
+**Full install (with OCR + community detection):**
 ```bash
-# Community Detection (igraph)
-pip install python-igraph
-
-# Docling OCR (PDF/Images/DOCX → Markdown)
-pip install docling
+pip install numpy pyyaml python-igraph docling
 ```
 
-**Note:** `run_inbox.sh` uses a Python venv specified in `ocr.venv_path` (see `activewiki.json`). The venv must contain both `docling` AND `igraph` for community detection to work.
+**Note:** `run_inbox.sh` uses a Python venv specified in `ocr.venv_path` (see `activewiki.json`). The venv must contain at least `numpy` and `pyyaml`; add `igraph` for community detection and `docling` for document ingestion.
 
 ---
 
