@@ -195,7 +195,7 @@ MAX_REGISTRY_PROMPT_ENTRIES = 30
 CONFIDENCE_ORDER = {
     "extracted": 3,   # Direct statement in source text
     "inferred": 2,    # Logical conclusion derived from text
-    "ambiguous": 1,   # Uncertain or multi-interpretable
+    "weak": 1,        # Speculative or uncertain connection
 }
 DEFAULT_CONFIDENCE = "inferred"
 
@@ -521,13 +521,13 @@ Good (inferred — Schlussfolgerung):
   ]
 }
 
-Good (ambiguous — mehrdeutig):
+Good (weak — spekulative Verbindung):
 {
   "entities": [
     {"id": "simba", "label": "Simba", "type": "CONCEPT"}
   ],
   "relationships": [
-    {"source": "simba", "target": "hund", "type": "BEZOGEN_AUF", "description": "Simba könnte ein Hund sein", "confidence": "ambiguous"}
+    {"source": "simba", "target": "hund", "type": "BEZOGEN_AUF", "description": "Simba könnte ein Hund sein", "confidence": "weak"}
   ]
 }
 
@@ -535,12 +535,12 @@ Good (ambiguous — mehrdeutig):
 Jede Beziehung braucht ein Confidence-Level:
 - **extracted** = direkte Aussage im Text (z.B. "Mietpreis: 720€", "Max wohnt in Gruenwald")
 - **inferred** = logische Schlussfolgerung (z.B. "Max besitzt Haus → er investiert")
-- **ambiguous** = mehrdeutig oder unsicher (z.B. "Simba" — Hund? Katze? Person?)
+- **weak** = schwache/spekulative Verbindung (z.B. "Simba" — Hund? Katze? Person?)
 
 Regeln:
 1. Wenn es direkt im Text steht → **extracted**
 2. Wenn du es schlussfolgern musst → **inferred**
-3. Wenn du dir unsicher bist → **ambiguous** (lieber ambiguous als falsches extracted!)
+3. Wenn du dir unsicher bist → **weak** (lieber weak als falsches extracted!)
 
 ## POSITIVE BEISPIELE (mit Relations!)
 Good: {
@@ -612,7 +612,7 @@ Du MUSST gültiges JSON zurückgeben mit genau dieser Struktur:
     {"id": "kebab-case-id", "label": "Lesbarer Name", "type": "ENTITY_TYPE", "description": "Max 25 Zeichen"}
   ],
   "relationships": [
-    {"source": "entity_id_a", "target": "entity_id_b", "type": "RELATION_TYPE", "description": "Was verbindet sie", "confidence": "extracted|inferred|ambiguous"}
+    {"source": "entity_id_a", "target": "entity_id_b", "type": "RELATION_TYPE", "description": "Was verbindet sie", "confidence": "extracted|inferred|weak"}
   ]
 }
 
@@ -890,6 +890,14 @@ def _record_graph_migration(conn: sqlite3.Connection, name: str) -> None:
     conn.commit()
 
 
+def _has_migration(conn: sqlite3.Connection, name: str) -> bool:
+    """Check whether a named graph migration has already been applied."""
+    row = conn.execute(
+        "SELECT 1 FROM _graph_migrations WHERE name = ?", (name,)
+    ).fetchone()
+    return row is not None
+
+
 def _migrate_unique_constraint(conn: sqlite3.Connection) -> None:
     """Add UNIQUE(scope, kind, ref, chunk_idx) to an existing chunks table."""
     log("migrate", " adding UNIQUE(scope, kind, ref, chunk_idx) to chunks ...")
@@ -1075,6 +1083,12 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.commit()
         _record_graph_migration(conn, "v4_relationships_confidence")
 
+    # Rename ambiguous → weak confidence values (migration v6)
+    if not _has_migration(conn, "v6_confidence_weak"):
+        conn.execute("UPDATE relationships SET confidence = 'weak' WHERE confidence = 'ambiguous'")
+        conn.commit()
+        _record_graph_migration(conn, "v6_confidence_weak")
+
     # Add valid_until column to entities if not present (soft-delete for entity dedup)
     if not _has_column(conn, "entities", "valid_until"):
         conn.execute("ALTER TABLE entities ADD COLUMN valid_until TEXT DEFAULT NULL")
@@ -1095,7 +1109,7 @@ def _deduplicate_relationships(conn: sqlite3.Connection) -> int:
 
     Confidence-aware: a newer row can only replace an older row if its confidence
     is >= the older row's confidence. An 'extracted' fact can NEVER be overwritten
-    by an 'inferred' or 'ambiguous' one.
+    by an 'inferred' or 'weak' one.
 
     Returns number of relationships invalidated."""
     affected = conn.execute("""
@@ -3231,6 +3245,51 @@ def stats() -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def cmd_graph_god_nodes(top_n: int = 10) -> None:
+    """Show the top-N entities by connection count (most connected nodes).
+
+    Prints a formatted table to stdout.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("""
+        SELECT e.label, e.entity_type, COUNT(DISTINCT r.id) AS connections
+        FROM entities e
+        LEFT JOIN relationships r
+            ON (r.source_id = e.id OR r.target_id = e.id)
+            AND r.valid_until IS NULL
+        WHERE e.valid_until IS NULL
+        GROUP BY e.id
+        ORDER BY connections DESC, e.label ASC
+        LIMIT ?
+    """, (top_n,)).fetchall()
+    conn.close()
+
+    if not rows:
+        print("No entities found.")
+        return
+
+    # Column widths
+    rank_w = len(str(top_n))
+    label_w = max(len(r[0]) for r in rows) + 2
+    type_w = max(max(len(r[1]) for r in rows), 6)  # at least "TYPE"
+    conn_w = max(len(str(r[2])) for r in rows) + 2  # at least "CONN"
+
+    def _pad(s, w):
+        return str(s).ljust(w)
+
+    # Header
+    header = f"{'#':<{rank_w}} | {'Label':<{label_w}} | {'Type':<{type_w}} | {'Connections':<{conn_w}}"
+    sep = "-" * len(header)
+
+    print(f"\n{_pad('', rank_w)} {_pad(f'Top {top_n} God Nodes', label_w + type_w + conn_w + 8)}")
+    print(sep)
+    print(header)
+    print(sep)
+
+    for i, (label, etype, conns) in enumerate(rows, 1):
+        print(f"{_pad(i, rank_w)} | {_pad(label, label_w)} | {_pad(etype, type_w)} | {_pad(conns, conn_w)}")
+
+
 def _graph_has_tables() -> bool:
     """Check whether graph tables exist in the DB."""
     if not DB_PATH.exists():
@@ -4218,8 +4277,13 @@ def main() -> int:
     sp_gp.add_argument("--scopes", type=str, default=None,
         help="Comma-separated scope allow-list (defensive filter)")
 
+    # graph god-nodes (top entities by connection count)
+    sp_gn = graph_sub.add_parser("god-nodes", help="Top entities by connection count (most connected)")
+    sp_gn.add_argument("--top", type=int, default=10,
+                       help="Number of top entities to show (default: 10)")
+
     # graph communities
-    sp_gc = graph_sub.add_parser("communities", help="Community detection & summaries (Phase 2)")
+    sp_gc = graph_sub.add_parser("communities", help="Community detection & summaries (Phase 2)"
     comm_sub = sp_gc.add_subparsers(dest="comm_cmd")
 
     sp_cbuild = comm_sub.add_parser("build", help="Build communities + LLM summaries")
@@ -4247,7 +4311,7 @@ def main() -> int:
     )
     sp_gh.add_argument(
         "--min-confidence",
-        choices=["extracted", "inferred", "ambiguous"],
+        choices=["extracted", "inferred", "weak"],
         default=None,
         help="Only include relationships at or above this confidence level",
     )
@@ -4386,6 +4450,12 @@ def main() -> int:
                 cmd_communities_show(args.id)
             else:
                 ap.print_help()
+        elif gc == "god-nodes":
+            if not _graph_has_tables():
+                log("error", " Graph tables not found. Run `vectordb.py graph build` first.", stderr=True)
+                sys.exit(1)
+            top_n = getattr(args, "top", 10)
+            cmd_graph_god_nodes(top_n=top_n)
         elif gc == "html":
             min_conf = getattr(args, "min_confidence", None)
             all_flag = getattr(args, "all_graph", False)

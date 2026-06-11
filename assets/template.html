@@ -23,29 +23,43 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .type-badge-ADDRESS{background:rgba(63,185,80,.15);color:#3fb950}
 .type-badge-PROPERTY{background:rgba(240,136,62,.15);color:#f0883e}
 .type-badge-ORGANIZATION{background:rgba(163,113,247,.15);color:#a371f7}
-.type-badge-RATIONALE{background:rgba(247,120,186,.15);color:#f778ba}
+.type-badge-RATIONALE{background:rgba(88,166,255,.15);color:#58a6ff}
 .sidebar-link-label{color:#c9d1d9;font-size:14px;margin-bottom:4px;line-height:1.4}
 
 /* Confidence badges */
 .confidence-extracted{background:rgba(63,185,80,.15);color:#3fb950;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600}
-.confidence-inferred{background:rgba(240,136,62,.15);color:#f0883e;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600}
-.confidence-assumed{background:rgba(139,148,158,.15);color:#8b949e;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600}
+.confidence-inferred{background:rgba(250,204,21,.15);color:#facc15;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600}
+.confidence-weak{background:rgba(156,163,175,.15);color:#9ca3af;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600}
 
 /* Link styling */
 .link-line{stroke:#30363d;stroke-width:1.5;fill:none}
 .link-line.highlighted{stroke:#58a6ff;stroke-width:2.5}
 .link-line.dimmed{stroke-opacity:.08}
+.link-extracted{stroke:#4ade80;stroke-width:2}
+.link-inferred{stroke:#facc15;stroke-width:1.5}
+.link-weak{stroke:#9ca3af;stroke-width:1;stroke-opacity:.4}
 
 /* Node circles */
 .node-circle{stroke:#0d1117;stroke-width:2;cursor:pointer;transition:stroke-width .15s ease}
 .node-circle:hover{stroke-width:3}
 .node-circle.highlighted{stroke:#fff;stroke-width:3}
 .node-circle.dimmed{opacity:.12}
+/* Rationale nodes — diamond shape */
+.rationale-diamond{fill:none;stroke:#58a6ff;stroke-width:2.5;cursor:pointer;transition:stroke-width .15s ease}
+.rationale-diamond:hover{stroke-width:3.5}
+.rationale-diamond.highlighted{stroke:#fff;stroke-width:3.5}
+.rationale-diamond.dimmed{opacity:.12}
+.rationale-q-mark{font-size:14px;font-weight:bold;fill:#58a6ff;pointer-events:none;text-anchor:middle;dominant-baseline:central;text-shadow:0 0 4px #0d1117,0 0 4px #0d1117}
+.rationale-q-mark.highlighted{fill:#fff}
+.rationale-q-mark.dimmed{opacity:.12}
 
 /* Node labels */
 .node-label{font-size:10px;fill:#c9d1d9;pointer-events:none;text-shadow:0 0 4px #0d1117,0 0 4px #0d1117}
 .node-label.highlighted{fill:#fff;font-weight:600}
 .node-label.dimmed{opacity:.12}
+.rationale-label{font-size:10px;fill:#58a6ff;font-weight:600;pointer-events:none;text-shadow:0 0 4px #0d1117,0 0 4px #0d1117}
+.rationale-label.highlighted{fill:#fff;font-weight:700}
+.rationale-label.dimmed{opacity:.12}
 
 /* Link labels (shown on hover) */
 .link-label{font-size:9px;fill:#8b949e;pointer-events:none;opacity:0;transition:opacity .15s ease;text-anchor:middle}
@@ -80,6 +94,38 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 <!-- Sidebar -->
 <div id="sidebar">
   <button class="close-sidebar-btn" id="close-sidebar">&times;</button>
+
+  <!-- Confidence Legend -->
+  <div class="sidebar-section-title">Legend</div>
+
+  <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:6px;">
+    <div style="font-size:11px;color:#f0883e;font-weight:600;margin-top:4px;">Link Confidence</div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="display:inline-block;width:24px;height:2px;background:#4ade80;border-radius:1;"></span>
+      <span style="font-size:11px;color:#c9d1d9;">extracted — directly stated</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="display:inline-block;width:24px;height:2px;background:#facc15;border-radius:1;"></span>
+      <span style="font-size:11px;color:#c9d1d9;">inferred — logical conclusion</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="display:inline-block;width:24px;height:2px;background:#9ca3af;border-radius:1;opacity:.4;"></span>
+      <span style="font-size:11px;color:#c9d1d9;">weak — speculative</span>
+    </div>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:6px;">
+    <div style="font-size:11px;color:#f0883e;font-weight:600;margin-top:4px;">Node Types</div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <svg width="22" height="22"><polygon points="11,2 20,11 11,20 2,11" fill="rgba(88,166,255,0.2)" stroke="#58a6ff" stroke-width="2"/><text x="11" y="13" text-anchor="middle" fill="#58a6ff" font-size="10" font-weight="bold">?</text></svg>
+      <span style="font-size:11px;color:#c9d1d9;">RATIONALE — open question (◇)</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <svg width="22" height="22"><circle cx="11" cy="11" r="8" fill="#8b949e" stroke="#0d1117" stroke-width="2"/></svg>
+      <span style="font-size:11px;color:#c9d1d9;">Normal entity node (●)</span>
+    </div>
+  </div>
+
   <div id="sidebar-content"></div>
 </div>
 
@@ -105,7 +151,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
     ADDRESS:      "#3fb950",
     PROPERTY:     "#f0883e",
     ORGANIZATION: "#a371f7",
-    RATIONALE:    "#f778ba",
+    RATIONALE:    "#58a6ff",
     DEFAULT:      "#8b949e"
   };
 
@@ -179,7 +225,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
     .force("y", d3.forceY(height / 2).strength(0.06));
 
   function nodeRadius(d) {
+    if (d.type === 'RATIONALE') return Math.max(16, Math.sqrt(d.linkCount) * 3 + 8);
     return Math.sqrt(d.linkCount) * 4 + 5;
+  }
+
+  function isRationale(d) {
+    return d.type === 'RATIONALE';
   }
 
   // ── Render Links ──────────────────────────────────────────────
@@ -187,7 +238,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
     .data(links)
     .enter()
     .append("line")
-    .attr("class", "link-line")
+    .attr("class", function(d) {
+      var c = d.confidence || "";
+      if (c === "extracted") return "link-extracted";
+      if (c === "inferred") return "link-inferred";
+      if (c === "weak") return "link-weak";
+      return "link-line";
+    })
     .attr("marker-end", "url(#arrow)");
 
   // Link labels (hidden by default)
@@ -209,16 +266,39 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
       .on("drag", dragged)
       .on("end", dragEnded));
 
-  nodeGroup.append("circle")
-    .attr("class", "node-circle")
-    .attr("r", function(d) { return nodeRadius(d); })
-    .attr("fill", function(d) { return nodeColor(d.type); });
-
-  nodeGroup.append("text")
-    .attr("class", "node-label")
-    .attr("dx", function(d) { return nodeRadius(d) + 6; })
-    .attr("dy", "0.35em")
-    .text(function(d) { return d.label; });
+  // For non-RATIONALE nodes: circle; for RATIONALE: diamond + question mark
+  nodeGroup.each(function(d) {
+    if (isRationale(d)) {
+      var g = d3.select(this);
+      var r = nodeRadius(d);
+      // Diamond shape
+      g.append("polygon")
+        .attr("class", "rationale-diamond")
+        .attr("points", "0," + (-r) + " " + r + ",0 0," + r + " " + (-r) + ",0");
+      // Question mark inside
+      g.append("text")
+        .attr("class", "rationale-q-mark")
+        .text("?");
+      // Label — shifted further due to diamond shape
+      g.append("text")
+        .attr("class", "rationale-label")
+        .attr("dx", r + 8)
+        .attr("dy", "0.35em")
+        .text(d.label);
+    } else {
+      var g = d3.select(this);
+      var r = nodeRadius(d);
+      g.append("circle")
+        .attr("class", "node-circle")
+        .attr("r", r)
+        .attr("fill", nodeColor(d.type));
+      g.append("text")
+        .attr("class", "node-label")
+        .attr("dx", r + 6)
+        .attr("dy", "0.35em")
+        .text(d.label);
+    }
+  });
 
   // ── Interactions ──────────────────────────────────────────────
   var selectedNodeId = null;
@@ -263,7 +343,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
       .classed("dimmed", function(n) { return !connectedIds.has(n.id); })
       .classed("highlighted", function(n) { return n.id === d.id; });
 
+    nodeGroup.select(".rationale-diamond")
+      .classed("dimmed", function(n) { return !connectedIds.has(n.id); })
+      .classed("highlighted", function(n) { return n.id === d.id; });
+
+    nodeGroup.select(".rationale-q-mark")
+      .classed("dimmed", function(n) { return !connectedIds.has(n.id); })
+      .classed("highlighted", function(n) { return n.id === d.id; });
+
     nodeGroup.select(".node-label")
+      .classed("dimmed", function(n) { return !connectedIds.has(n.id); })
+      .classed("highlighted", function(n) { return n.id === d.id; });
+
+    nodeGroup.select(".rationale-label")
       .classed("dimmed", function(n) { return !connectedIds.has(n.id); })
       .classed("highlighted", function(n) { return n.id === d.id; });
 
@@ -273,16 +365,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
         var tid = l.target_id || l.target;
         return !(sid === d.id || tid === d.id);
       })
-      .classed("highlighted", function(l) {
-        var sid = l.source_id || l.source;
-        var tid = l.target_id || l.target;
-        return sid === d.id || tid === d.id;
-      });
+      // intentionally no stroke override — keep confidence-based color
   }
 
   function unhighlight() {
     nodeGroup.select(".node-circle").classed("dimmed", false).classed("highlighted", false);
+    nodeGroup.select(".rationale-diamond").classed("dimmed", false).classed("highlighted", false);
+    nodeGroup.select(".rationale-q-mark").classed("dimmed", false).classed("highlighted", false);
     nodeGroup.select(".node-label").classed("dimmed", false).classed("highlighted", false);
+    nodeGroup.select(".rationale-label").classed("dimmed", false).classed("highlighted", false);
     linkLines.classed("dimmed", false).classed("highlighted", false);
   }
 
@@ -295,7 +386,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 
   function showTooltip(event, d) {
     var html = '<div class="tt-label">' + escapeHtml(d.label) + '</div>';
-    if (d.description) {
+    if (d.type === "RATIONALE") {
+      // Rationale nodes get enhanced tooltip with "Because:" prefix
+      html += '<div class="tt-type" style="color:#58a6ff;font-size:10px;margin-top:2px;">⚡ Rationale Node</div>';
+      if (d.description) {
+        html += '<div class="tt-desc">💡 Because ' + escapeHtml(d.description).toLowerCase() + '</div>';
+      }
+    } else if (d.description) {
       html += '<div class="tt-desc">' + escapeHtml(d.description) + '</div>';
     }
     tooltipEl.innerHTML = html;
@@ -441,7 +538,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
       .classed("dimmed", function(n) { return !matchIds.has(n.id); })
       .classed("highlighted", function(n) { return matchIds.has(n.id); });
 
+    nodeGroup.select(".rationale-diamond")
+      .classed("dimmed", function(n) { return !matchIds.has(n.id); })
+      .classed("highlighted", function(n) { return matchIds.has(n.id); });
+
+    nodeGroup.select(".rationale-q-mark")
+      .classed("dimmed", function(n) { return !matchIds.has(n.id); })
+      .classed("highlighted", function(n) { return matchIds.has(n.id); });
+
     nodeGroup.select(".node-label")
+      .classed("dimmed", function(n) { return !matchIds.has(n.id); })
+      .classed("highlighted", function(n) { return matchIds.has(n.id); });
+
+    nodeGroup.select(".rationale-label")
       .classed("dimmed", function(n) { return !matchIds.has(n.id); })
       .classed("highlighted", function(n) { return matchIds.has(n.id); });
 
