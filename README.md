@@ -51,10 +51,11 @@ Done. Your agent now searches your wiki in every response.
 ### Knowledge Graph
 - **Entity extraction** from documents via LLM (OpenAI) — automatically identifies people, places, organizations, and concepts
 - **Relationship mapping** — entities are connected by typed, directed relationships (has_parent_object, part_of_project, owned_by, etc.)
-- **Confidence tags** — every relationship carries a confidence level (confirmed, inferred, uncertain) reflecting how reliably it was extracted
-- **Rationale entities** — the "why" behind connections is preserved as traceable rationale nodes
+- **Confidence tags** — every relationship carries a confidence level (`extracted`, `inferred`, `weak`) reflecting how reliably it was extracted. Visualized with color-coded links in the D3.js graph (green/yellow/gray)
+- **Rationale entities** — the "why" behind connections is preserved as traceable rationale nodes, rendered as distinctive blue diamond shapes in the D3.js visualization
 - **Community detection** — Louvain algorithm identifies clusters of related entities (e.g., "Musterort real estate cluster", "Heimserver home automation cluster")
 - **Interactive HTML visualization** — explore the graph visually with D3.js: filter by type, search entities, adjust zoom, export as PNG/SVG
+- **God Nodes CLI** — identify the most connected entities: `vectordb.py graph god-nodes --top 10`
 
 ### Entity Resolution (Deduplication)
 - **Hybrid matching** — cosine similarity (embeddings) + Jaccard string similarity (token overlap) catches duplicates that pure semantic similarity misses
