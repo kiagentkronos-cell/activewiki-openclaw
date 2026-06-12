@@ -41,9 +41,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 
 /* Historical transition link styles */
 .link-fusionierte-mit{stroke:#f97316;stroke-width:2;stroke-dasharray:8,4}
+.link-fusionierte-mit.highlighted{stroke-width:3}
+.link-fusionierte-mit.dimmed{stroke-opacity:.08}
 .link-nachfolger-von{stroke:#60a5fa;stroke-width:2;stroke-dasharray:8,4}
+.link-nachfolger-von.highlighted{stroke-width:3}
+.link-nachfolger-von.dimmed{stroke-opacity:.08}
 .link-umgenannt-zu{stroke:#9ca3af;stroke-width:1.5;stroke-dasharray:2,4}
-.link-aufgeteilt-in{stroke:#4ade80;stroke-width:2;stroke-dasharray:8,4}
+.link-umgenannt-zu.highlighted{stroke-width:2}
+.link-umgenannt-zu.dimmed{stroke-opacity:.08}
+.link-aufgeteilt-in{stroke:#22c55e;stroke-width:2;stroke-dasharray:8,4}
+.link-aufgeteilt-in.highlighted{stroke-width:3}
+.link-aufgeteilt-in.dimmed{stroke-opacity:.08}
 
 /* Node circles */
 .node-circle{stroke:#0d1117;stroke-width:2;cursor:pointer;transition:stroke-width .15s ease}
@@ -139,20 +147,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
   <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:6px;">
     <div style="font-size:11px;color:#f0883e;font-weight:600;margin-top:4px;">Historische Übergänge</div>
     <div style="display:flex;align-items:center;gap:8px;">
-      <span style="display:inline-block;width:24px;height:2px;background:#f97316;border-radius:1;" title="FUSIONIERTE_MIT"></span>
-      <span style="display:inline-block;width:24px;height:2px;background:#f97316;border-radius:1;border-top:2px dashed #f97316;height:0;"></span>
+      <span style="display:inline-block;width:36px;height:0;border-top:2px dashed #f97316;"></span>
       <span style="font-size:11px;color:#c9d1d9;">FUSIONIERTE_MIT (gestrichelt)</span>
     </div>
     <div style="display:flex;align-items:center;gap:8px;">
-      <span style="display:inline-block;width:24px;height:2px;background:#60a5fa;border-radius:1;border-top:2px dashed #60a5fa;height:0;"></span>
+      <span style="display:inline-block;width:36px;height:0;border-top:2px dashed #60a5fa;"></span>
       <span style="font-size:11px;color:#c9d1d9;">NACHFOLGER_VON (gestrichelt)</span>
     </div>
     <div style="display:flex;align-items:center;gap:8px;">
-      <span style="display:inline-block;width:24px;height:2px;background:#9ca3af;border-radius:1;border-top:2px dotted #9ca3af;height:0;"></span>
+      <span style="display:inline-block;width:36px;height:0;border-top:2px dotted #9ca3af;"></span>
       <span style="font-size:11px;color:#c9d1d9;">UMGENANNT_ZU (gepunktet)</span>
     </div>
     <div style="display:flex;align-items:center;gap:8px;">
-      <span style="display:inline-block;width:24px;height:2px;background:#4ade80;border-radius:1;border-top:2px dashed #4ade80;height:0;"></span>
+      <span style="display:inline-block;width:36px;height:0;border-top:2px dashed #22c55e;"></span>
       <span style="font-size:11px;color:#c9d1d9;">AUFGETEILT_IN (gestrichelt)</span>
     </div>
   </div>
@@ -246,7 +253,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
     "arrow-fusionierte-mit": "#f97316",
     "arrow-nachfolger-von": "#60a5fa",
     "arrow-umgenannt-zu": "#9ca3af",
-    "arrow-aufgeteilt-in": "#4ade80"
+    "arrow-aufgeteilt-in": "#22c55e"
   };
   Object.entries(histArrowColors).forEach(function(entry) {
     svg.append("defs").append("marker")
