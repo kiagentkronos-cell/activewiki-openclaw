@@ -39,6 +39,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .link-inferred{stroke:#facc15;stroke-width:1.5}
 .link-weak{stroke:#9ca3af;stroke-width:1;stroke-opacity:.4}
 
+/* Historical transition link styles */
+.link-fusionierte-mit{stroke:#f97316;stroke-width:2;stroke-dasharray:8,4}
+.link-nachfolger-von{stroke:#60a5fa;stroke-width:2;stroke-dasharray:8,4}
+.link-umgenannt-zu{stroke:#9ca3af;stroke-width:1.5;stroke-dasharray:2,4}
+.link-aufgeteilt-in{stroke:#4ade80;stroke-width:2;stroke-dasharray:8,4}
+
 /* Node circles */
 .node-circle{stroke:#0d1117;stroke-width:2;cursor:pointer;transition:stroke-width .15s ease}
 .node-circle:hover{stroke-width:3}
@@ -130,6 +136,27 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
     <div style="display:flex;align-items:center;gap:8px;"><span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:#c9d1d9;"></span><span style="font-size:11px;color:#c9d1d9;">OTHER</span></div>
   </div>
 
+  <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:6px;">
+    <div style="font-size:11px;color:#f0883e;font-weight:600;margin-top:4px;">Historische Übergänge</div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="display:inline-block;width:24px;height:2px;background:#f97316;border-radius:1;" title="FUSIONIERTE_MIT"></span>
+      <span style="display:inline-block;width:24px;height:2px;background:#f97316;border-radius:1;border-top:2px dashed #f97316;height:0;"></span>
+      <span style="font-size:11px;color:#c9d1d9;">FUSIONIERTE_MIT (gestrichelt)</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="display:inline-block;width:24px;height:2px;background:#60a5fa;border-radius:1;border-top:2px dashed #60a5fa;height:0;"></span>
+      <span style="font-size:11px;color:#c9d1d9;">NACHFOLGER_VON (gestrichelt)</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="display:inline-block;width:24px;height:2px;background:#9ca3af;border-radius:1;border-top:2px dotted #9ca3af;height:0;"></span>
+      <span style="font-size:11px;color:#c9d1d9;">UMGENANNT_ZU (gepunktet)</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="display:inline-block;width:24px;height:2px;background:#4ade80;border-radius:1;border-top:2px dashed #4ade80;height:0;"></span>
+      <span style="font-size:11px;color:#c9d1d9;">AUFGETEILT_IN (gestrichelt)</span>
+    </div>
+  </div>
+
   <div id="sidebar-content"></div>
 </div>
 
@@ -214,6 +241,27 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
     .attr("d", "M0,-5L10,0L0,5")
     .attr("fill", "#30363d");
 
+  // Colored arrow markers for historical transition types
+  var histArrowColors = {
+    "arrow-fusionierte-mit": "#f97316",
+    "arrow-nachfolger-von": "#60a5fa",
+    "arrow-umgenannt-zu": "#9ca3af",
+    "arrow-aufgeteilt-in": "#4ade80"
+  };
+  Object.entries(histArrowColors).forEach(function(entry) {
+    svg.append("defs").append("marker")
+      .attr("id", entry[0])
+      .attr("viewBox", "0 -5 10 10")
+      .attr("refX", 28)
+      .attr("refY", 0)
+      .attr("markerWidth", 6)
+      .attr("markerHeight", 6)
+      .attr("orient", "auto")
+      .append("path")
+      .attr("d", "M0,-5L10,0L0,5")
+      .attr("fill", entry[1]);
+  });
+
   var zoomGroup = svg.append("g");
 
   // Zoom / Pan
@@ -250,13 +298,27 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
     .enter()
     .append("line")
     .attr("class", function(d) {
+      var rt = (d.relation_type || "").toUpperCase();
+      // Historical transition types first (they override confidence colors)
+      if (rt === "FUSIONIERTE_MIT") return "link-fusionierte-mit";
+      if (rt === "NACHFOLGER_VON") return "link-nachfolger-von";
+      if (rt === "UMGENANNT_ZU") return "link-umgenannt-zu";
+      if (rt === "AUFGETEILT_IN") return "link-aufgeteilt-in";
+      // Fall back to confidence-based coloring
       var c = d.confidence || "";
       if (c === "extracted") return "link-extracted";
       if (c === "inferred") return "link-inferred";
       if (c === "weak") return "link-weak";
       return "link-line";
     })
-    .attr("marker-end", "url(#arrow)");
+    .attr("marker-end", function(d) {
+      var rt = (d.relation_type || "").toUpperCase();
+      if (rt === "FUSIONIERTE_MIT") return "url(#arrow-fusionierte-mit)";
+      if (rt === "NACHFOLGER_VON") return "url(#arrow-nachfolger-von)";
+      if (rt === "UMGENANNT_ZU") return "url(#arrow-umgenannt-zu)";
+      if (rt === "AUFGETEILT_IN") return "url(#arrow-aufgeteilt-in)";
+      return "url(#arrow)";
+    });
 
   // Link labels (hidden by default)
   var linkLabels = zoomGroup.selectAll(".link-label")

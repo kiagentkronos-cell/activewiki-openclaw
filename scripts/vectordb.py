@@ -374,6 +374,8 @@ RELATION_TYPES = [
     "STAMMT_VON", "KOSTET",
     # Why-Nodes (Phase 2B): Rationale ↔ Fact linking
     "ERKLÄRT_MIT", "HINTET_AUF", "WEGEN",
+    # Historical transitions (Phase 3): corporate mergers, renames, splits
+    "FUSIONIERTE_MIT", "NACHFOLGER_VON", "UMGENANNT_ZU", "AUFGETEILT_IN",
 ]
 
 # ── Timestamped Logging ─────────────────────────────────────────────────────
@@ -443,6 +445,18 @@ STAMMT_VON - Herkunft/Erzeuger/Hersteller
 Allgemein:
 REFERENZIERT - verweist auf, zitiert, nennt explizit
 BEZOGEN_AUF - NUR als absoluter letzter Ausweg wenn nichts Spezifischeres passt
+
+Historische Übergänge (Unternehmensfusionen, Umbenennungen, Aufspaltungen):
+FUSIONIERTE_MIT - A fusionierte mit B und ist erloschen; B setzt sich fort (Richtung: A → B, A ist die aufgegangene Bank, B die aufnehmende)
+NACHFOLGER_VON - A ist Nachfolger von B (B ist erloschen, A übernimmt) (Richtung: A → B)
+UMGENANNT_ZU - A wurde in B umbenannt (nur Name geändert, keine Rechtsformänderung) (Richtung: A → B)
+AUFGETEILT_IN - A wurde in mehrere Nachfolger aufgeteilt (z.B. A → B1, A → B2) (Richtung: A → B)
+
+Hinweis zu historischen Relations: FUSIONIERTE_MIT und NACHFOLGER_VON sind invers zueinander.
+Wenn "Bank X fusionierte mit Bank Y", dann:
+  - Bank X -FUSIONIERTE_MIT→ Bank Y (X ist aufgegangen)
+  - Bank Y -NACHFOLGER_VON→ Bank X (Y ist Nachfolger von X)
+Beide zusammen ergeben ein klares Bild. Diese Relations sind dauerhaft historisch — kein valid_until nötig.
 
 ## REGELN
 1. Maximum 20 Entities pro Seite. Weniger ist besser.
@@ -602,6 +616,42 @@ Good (Rationale / Why-Node):
   ],
   "relationships": [
     {"source": "nebenkosten-verdopplung-2024", "target": "720-euro-miete", "type": "ERKLÄRT_MIT", "description": "Miete stieg wegen Nebenkosten", "confidence": "extracted"}
+  ]
+}
+
+Good (Historische Fusion — beide Richtungen!):
+{
+  "entities": [
+    {"id": "raiffeisenbank-musterstadt", "label": "Raiffeisenbank Musterstadt eG", "type": "ORGANIZATION"},
+    {"id": "volksbank-musterstadt", "label": "Volksbank Musterstadt eG", "type": "ORGANIZATION"}
+  ],
+  "relationships": [
+    {"source": "raiffeisenbank-musterstadt", "target": "volksbank-musterstadt", "type": "FUSIONIERTE_MIT", "description": "Raiffeisenbank Musterstadt fusionierte mit Volksbank Musterstadt", "confidence": "extracted"},
+    {"source": "volksbank-musterstadt", "target": "raiffeisenbank-musterstadt", "type": "NACHFOLGER_VON", "description": "Volksbank Musterstadt ist Nachfolger von Raiffeisenbank Musterstadt", "confidence": "extracted"}
+  ]
+}
+
+Good (Umbenennung):
+{
+  "entities": [
+    {"id": "telekom-ag", "label": "Telekom AG", "type": "ORGANIZATION"},
+    {"id": "deutsche-telekom-ag", "label": "Deutsche Telekom AG", "type": "ORGANIZATION"}
+  ],
+  "relationships": [
+    {"source": "telekom-ag", "target": "deutsche-telekom-ag", "type": "UMGENANNT_ZU", "description": "Telekom AG wurde in Deutsche Telekom AG umbenannt", "confidence": "extracted"}
+  ]
+}
+
+Good (Aufspaltung):
+{
+  "entities": [
+    {"id": "vodafone-germany", "label": "Vodafone Germany", "type": "ORGANIZATION"},
+    {"id": "vodafone-de", "label": "Vodafone Deutschland", "type": "ORGANIZATION"},
+    {"id": "o2-deutschland", "label": "O2 Deutschland", "type": "ORGANIZATION"}
+  ],
+  "relationships": [
+    {"source": "vodafone-germany", "target": "vodafone-de", "type": "AUFGETEILT_IN", "description": "Vodafone Germany aufgeteilt in Vodafone DE", "confidence": "extracted"},
+    {"source": "vodafone-germany", "target": "o2-deutschland", "type": "AUFGETEILT_IN", "description": "Vodafone Germany aufgeteilt in O2 Deutschland", "confidence": "extracted"}
   ]
 }
 
