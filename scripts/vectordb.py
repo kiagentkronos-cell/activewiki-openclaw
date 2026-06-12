@@ -4283,7 +4283,7 @@ def main() -> int:
                        help="Number of top entities to show (default: 10)")
 
     # graph communities
-    sp_gc = graph_sub.add_parser("communities", help="Community detection & summaries (Phase 2)"
+    sp_gc = graph_sub.add_parser("communities", help="Community detection & summaries (Phase 2)")
     comm_sub = sp_gc.add_subparsers(dest="comm_cmd")
 
     sp_cbuild = comm_sub.add_parser("build", help="Build communities + LLM summaries")
