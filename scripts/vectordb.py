@@ -3872,6 +3872,11 @@ def _build_full_graph_data(
             f" AND CASE confidence WHEN 'extracted' THEN 3 WHEN 'inferred' THEN 2 ELSE 1 END >= {min_val}"
         )
 
+    # Only include relationships where BOTH endpoints are active entities
+    # (prevents dangling links to soft-deleted entities — D3 crashes on missing targets)
+    rel_where += " AND source_id IN (SELECT id FROM entities WHERE valid_until IS NULL) "
+    rel_where += "AND target_id IN (SELECT id FROM entities WHERE valid_until IS NULL)"
+
     rel_rows = db.execute(
         f"SELECT source_id, target_id, relation_type, COALESCE(confidence, '{DEFAULT_CONFIDENCE}') "
         f"FROM relationships WHERE {rel_where}"
