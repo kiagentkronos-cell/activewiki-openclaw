@@ -1,6 +1,6 @@
 # ActiveWiki — OpenClaw Wiki Integration
 
-**Status:** Stable/Release | **Last Changed:** 2026-05-30 | **Author:** Max Mustermann
+**Status:** Stable/Release | **Last Changed:** 2026-05-30 | **Author:** ActiveWiki Contributors
 
 ---
 
@@ -191,7 +191,7 @@ Rules are stored in `evolution_rules.json` with the following structure:
 
 ### Component 4: Human-in-the-Loop Review (MANDATORY)
 
-No auto-activation. Every new rule sends a Discord message to Owner in the #system channel:
+No auto-activation. Every new rule sends a Discord message to the reviewer:
 
 ```
 🔄 ActiveWiki Prompt-Evolution — Neue Regel zum Review
@@ -207,7 +207,7 @@ No auto-activation. Every new rule sends a Discord message to Owner in the #syst
 
 - **Approved** → `approved` → inserted into prompt on next graph build → `active`
 - **Rejected** → `rejected`. Won't resurface until ≥3 more identical failures occur after rejection
-- **TTL expired** → archived (not deleted). Evidence preserved for later review when Owner returns
+- **TTL expired** → archived (not deleted). Evidence preserved for later review
 
 ### Component 5: Prompt Update + Versioning (`graph apply-prompt`)
 
@@ -222,10 +222,10 @@ Activated rules are appended to the prompt template as new `Good (...)` examples
 
 Metrics snapshot taken after rule activation (`failure_count`, `avg_confidence_weak_pct`, `orphan_rate`). Compared after 7 days of graph builds.
 
-- **Next-day early warning:** If failure rate increases >50% the day after activation → immediate review request to Owner
-- **7-day degradation signal:** If failure rate is equal or higher than before activation → rule automatically downgraded to `deprecated` + alert to Owner
+- **Next-day early warning:** If failure rate increases >50% the day after activation → immediate review request
+- **7-day degradation signal:** If failure rate is equal or higher than before activation → rule automatically downgraded to `deprecated` + alert
 - **Quarantine (two-stage):** `activated` → `quarantine` → `deprecated`
-- **Spiral protection (`graph spiral-protection`):** If ≥3 rules degrade consecutively within a month → complete halt of the evolution process until manual release by Owner
+- **Spiral protection (`graph spiral-protection`):** If ≥3 rules degrade consecutively within a month → complete halt of the evolution process until manual release
 
 ### CLI Reference
 
@@ -246,8 +246,8 @@ Metrics snapshot taken after rule activation (`failure_count`, `avg_confidence_w
 1. Graph build → `graph validate` finds dangling link Volksbank Musterstadt → KREDIT_BEI → DZ BANK and missing fusion relation
 2. `graph diagnose` → root cause: fusion context in document not extracted; exogenous error
 3. `graph evolve` → no existing rule covers fusion; template-based drafting produces concrete rule text
-4. Rule queued with SEVERITY_HIGH; Discord notification sent to Owner
-5. Owner approves via Discord
+4. Rule queued with SEVERITY_HIGH; Discord notification sent to the reviewer
+5. Reviewer approves via Discord
 6. `graph apply-prompt` → prompt extended with Good Fusion example + explicit FUSIONIERTE_MIT rule
 7. Next graph build → fusion relation automatically extracted → no manual intervention needed ✓
 

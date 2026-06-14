@@ -68,7 +68,7 @@ Done. Your agent now searches your wiki in every response.
 - **Automatic failure detection** — `graph validate` finds dangling links, over-merged entities, orphaned entities, confidence imbalance, and missing relation coverage
 - **LLM root-cause diagnosis** — `graph diagnose` and `graph evolve` analyze why extractions failed and draft concrete rules
 - **Rule queuing with dedup** — similar rules are merged via embedding cosine similarity; new rules enter an approval queue
-- **Human-in-the-loop (HITL)** — Owner reviews and approves every new rule via Discord before it touches the prompt
+- **Human-in-the-loop (HITL)** — Every new rule requires human approval via Discord before it touches the prompt
 - **Versioned prompt updates** — `graph apply-prompt` inserts approved rules with `[AUTO]` markers; old prompts are backed up
 - **Degradation detection** — `graph metrics` and `graph degradation-check` compare failure rates before/after rule activation; bad rules get deprecated automatically
 - **Spiral protection** — `graph spiral-protection` halts the entire loop if ≥3 rules degrade within a month
