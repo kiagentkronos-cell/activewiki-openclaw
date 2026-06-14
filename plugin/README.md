@@ -243,7 +243,7 @@ Metrics snapshot taken after rule activation (`failure_count`, `avg_confidence_w
 
 ### Example Flow
 
-1. Graph build → `graph validate` finds dangling link Volksbank Musterstadt → KREDIT_BEI → DZ BANK and missing fusion relation
+1. Graph build → `graph validate` finds dangling link between bank entities and missing fusion relation
 2. `graph diagnose` → root cause: fusion context in document not extracted; exogenous error
 3. `graph evolve` → no existing rule covers fusion; template-based drafting produces concrete rule text
 4. Rule queued with SEVERITY_HIGH; Discord notification sent to the reviewer

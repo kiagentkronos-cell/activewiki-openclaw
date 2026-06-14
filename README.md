@@ -53,7 +53,7 @@ Done. Your agent now searches your wiki in every response.
 - **Relationship mapping** — entities are connected by typed, directed relationships (has_parent_object, part_of_project, owned_by, etc.)
 - **Confidence tags** — every relationship carries a confidence level (`extracted`, `inferred`, `weak`) reflecting how reliably it was extracted. Visualized with color-coded links in the D3.js graph (green/yellow/gray)
 - **Rationale entities** — the "why" behind connections is preserved as traceable rationale nodes, rendered as distinctive blue diamond shapes in the D3.js visualization
-- **Community detection** — Louvain algorithm identifies clusters of related entities (e.g., "Musterort real estate cluster", "Heimserver home automation cluster")
+- **Community detection** — Louvain algorithm identifies clusters of related entities (e.g., "Real Estate Investment cluster", "Home Automation cluster")
 - **Interactive HTML visualization** — explore the graph visually with D3.js: filter by type, search entities, adjust zoom, export as PNG/SVG
 - **God Nodes CLI** — identify the most connected entities: `vectordb.py graph god-nodes --top 10`
 
