@@ -124,6 +124,135 @@ activewiki/
 
 ---
 
+## 5. Prompt Evolution Pipeline
+
+Inspired by Homer's "Organize then Retrieve" (Duke/Snowflake, 2026-06-10), the Prompt Evolution Loop automatically detects extraction failures, diagnoses root causes, drafts rules, and — after human approval — updates the distillation/graph-extraction prompt. The loop closes with degradation detection to catch rules that make things worse.
+
+### Architecture
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌──────────────┐     ┌─────────────────┐     ┌──────────────┐     ┌─────────────────┐
+│  FAILURE DETECT  │────▶│  DIAGNOSIS       │────▶│ RULE CONSISTENCY │────▶│  RULE QUEUING   │────▶│  HUMAN REVIEW   │────▶│  PROMPT UPDATE   │
+│  (Graph Valid.)  │     │  (LLM Root Cause) │     │ CHECK          │     │  (Approval Queue) │     │  (Mandatory HITL)│     │  (Versioned)     │
+└─────────────────┘     └──────────────────┘     └──────────────┘     └─────────────────┘     └─────────────────┘     └─────────┬───────┘
+                                                                                                                              │
+         ◀──────────────────── METRIKEN-CHECK (Degradation-Detection) ◀───────────────────────────────────────────────────────┘
+```
+
+### Component 1: Failure Detector (`graph validate`)
+
+Runs after every graph build or as a cron check. Validates five conditions:
+
+| Rule | Condition | Threshold |
+|------|-----------|----------|
+| **Dangling Links** | Relations pointing to soft-deleted targets | Only if both endpoints existed at extraction time |
+| **Over-Merged Entities** | >3 variants per entity via resolution | Only if caused by extraction, not post-hoc resolution |
+| **Orphaned Entities** | Entities with zero relations | Only if ≥5 orphans per page |
+| **Confidence Imbalance** | Too many weak-confidence relations | >40% weak (domain-dependent) |
+| **Missing Relation Coverage** | Domain-specific relation types not used | Only when context clearly indicates (e.g., "Fusion", "Übernahme") |
+
+Output: `{type, severity, evidence, page_source, entities_involved}`
+
+### Component 2: Diagnosis Engine (`graph diagnose`, `graph evolve`)
+
+Takes a failure event + wiki page + extraction prompt + extracted entities/relations and performs root-cause analysis via LLM with input sanitization (`<SOURCE_START>`/`<SOURCE_END>` markers isolate data from instructions).
+
+Two-stage consistency check:
+1. **Deterministic collision check** — does an existing rule cover this error type? Would the new direction conflict?
+2. **LLM-based consistency verification** — independent confirmation that diagnosis matches evidence.
+
+Template-based rule drafting transforms the diagnosis direction into a concrete prompt instruction without free-form LLM writing.
+
+Output: `{root_cause, error_type: "exogenous"|"endogenous", rule_direction, drafted_rule_text}`
+
+### Component 3: Rule Storage + Dedup + Queuing (`evolution_rules.json`)
+
+Rules are stored in `evolution_rules.json` with the following structure:
+
+```json
+{
+  "id": "uuid",
+  "text": "rule instruction",
+  "severity_weight": 0.8,
+  "failures_resolved": ["failure-id-1", "failure-id-2"],
+  "created": "2026-06-14T10:00:00Z",
+  "status": "pending_approval",
+  "originator": "auto",
+  "diagnosis_summary": "...",
+  "embedding_hash": "sha256:..."
+}
+```
+
+**Dedup:** Embedding cosine similarity > 0.85 triggers a merge candidate; LLM fine-filter confirms whether they're the same rule. Merged rules increase severity weight instead of creating duplicates.
+
+**Queuing:** New rules enter with `status: "pending_approval"`. Activation requires ≥2 identical failures (or SEVERITY_HIGH for single occurrences).
+
+**Rate limiting:** Maximum 3 new rules per week. Queue blocks if exceeded.
+
+### Component 4: Human-in-the-Loop Review (MANDATORY)
+
+No auto-activation. Every new rule sends a Discord message to Owner in the #system channel:
+
+```
+🔄 ActiveWiki Prompt-Evolution — Neue Regel zum Review
+
+⚠️ Problem: [FailureType] bei [Page] — [Count] mal vorkommend
+📋 Diagnose: [Root Cause] ([exogenous|endogenous])
+📝 Vorgeschlagene Regel: [drafted_rule_text]
+📊 Evidenz: [Failure Event Details]
+
+✅ Bestätigen oder ❌ Ablehnen
+⏱️ TTL: 14 Tage (Reminder alle 2 Tage)
+```
+
+- **Approved** → `approved` → inserted into prompt on next graph build → `active`
+- **Rejected** → `rejected`. Won't resurface until ≥3 more identical failures occur after rejection
+- **TTL expired** → archived (not deleted). Evidence preserved for later review when Owner returns
+
+### Component 5: Prompt Update + Versioning (`graph apply-prompt`)
+
+Activated rules are appended to the prompt template as new `Good (...)` examples and explicit rule lines with `[AUTO]` markers.
+
+**Versioning:**
+- `prompt_history.json`: `{version, hash, applied_rules[], timestamp, author, previous_version, metrics_before{}}`
+- Git-based versioning alongside JSON
+- Old prompt backed up as `prompts/prompt_v12_backup.md`
+
+### Component 6: Degradation Detection (`graph metrics`, `graph degradation-check`)
+
+Metrics snapshot taken after rule activation (`failure_count`, `avg_confidence_weak_pct`, `orphan_rate`). Compared after 7 days of graph builds.
+
+- **Next-day early warning:** If failure rate increases >50% the day after activation → immediate review request to Owner
+- **7-day degradation signal:** If failure rate is equal or higher than before activation → rule automatically downgraded to `deprecated` + alert to Owner
+- **Quarantine (two-stage):** `activated` → `quarantine` → `deprecated`
+- **Spiral protection (`graph spiral-protection`):** If ≥3 rules degrade consecutively within a month → complete halt of the evolution process until manual release by Owner
+
+### CLI Reference
+
+| Command | Description |
+|---------|-------------|
+| `vectordb.py graph validate` | Run failure detector on current graph |
+| `vectordb.py graph diagnose <failure-id>` | Root-cause analysis for a specific failure |
+| `vectordb.py graph evolve` | Full diagnosis + rule drafting pipeline |
+| `vectordb.py graph apply-prompt` | Insert approved rules into extraction prompt |
+| `vectordb.py graph metrics` | Show current graph health metrics |
+| `vectordb.py graph degradation-check` | Compare metrics before/after recent rule activations |
+| `vectordb.py graph spiral-protection` | Check if evolution loop should be halted |
+| `vectordb.py graph prompt-history` | List all prompt versions and applied rules |
+| `vectordb.py graph prompt-backup` | Create backup of current prompt |
+
+### Example Flow
+
+1. Graph build → `graph validate` finds dangling link Volksbank Musterstadt → KREDIT_BEI → DZ BANK and missing fusion relation
+2. `graph diagnose` → root cause: fusion context in document not extracted; exogenous error
+3. `graph evolve` → no existing rule covers fusion; template-based drafting produces concrete rule text
+4. Rule queued with SEVERITY_HIGH; Discord notification sent to Owner
+5. Owner approves via Discord
+6. `graph apply-prompt` → prompt extended with Good Fusion example + explicit FUSIONIERTE_MIT rule
+7. Next graph build → fusion relation automatically extracted → no manual intervention needed ✓
+
+---
+
 ## 4. Dependencies
 
 ### Python Packages

@@ -64,6 +64,25 @@ Done. Your agent now searches your wiki in every response.
 - **Dry-run mode** — preview merges before applying: `--dry-run` flag shows what would be merged without changing anything
 - **Transitive clustering** — Union-Find algorithm ensures A→B→C chains are resolved into single canonical entities
 
+### Prompt Evolution Loop
+- **Automatic failure detection** — `graph validate` finds dangling links, over-merged entities, orphaned entities, confidence imbalance, and missing relation coverage
+- **LLM root-cause diagnosis** — `graph diagnose` and `graph evolve` analyze why extractions failed and draft concrete rules
+- **Rule queuing with dedup** — similar rules are merged via embedding cosine similarity; new rules enter an approval queue
+- **Human-in-the-loop (HITL)** — Owner reviews and approves every new rule via Discord before it touches the prompt
+- **Versioned prompt updates** — `graph apply-prompt` inserts approved rules with `[AUTO]` markers; old prompts are backed up
+- **Degradation detection** — `graph metrics` and `graph degradation-check` compare failure rates before/after rule activation; bad rules get deprecated automatically
+- **Spiral protection** — `graph spiral-protection` halts the entire loop if ≥3 rules degrade within a month
+
+```
+Failure Detect → Diagnosis → Rule Queue → Human Review → Prompt Update → Degradation Check
+     ▲                                                                         │
+     └──────────────────────────────────────────────────────────────────────────┘
+```
+
+New CLI commands: `graph validate`, `graph diagnose`, `graph evolve`, `graph apply-prompt`, `graph metrics`, `graph degradation-check`, `graph spiral-protection`, `graph prompt-history`, `graph prompt-backup`.
+
+See [`plugin/README.md`](plugin/README.md) for the full Prompt Evolution Pipeline documentation.
+
 ### Active Memory Integration
 - OpenClaw plugin automatically injects wiki hits into every LLM response
 - Scope-gated results (private/family/public) based on user authorization
