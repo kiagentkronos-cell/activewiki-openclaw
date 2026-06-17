@@ -83,6 +83,13 @@ New CLI commands: `graph validate`, `graph diagnose`, `graph evolve`, `graph app
 
 See [`plugin/README.md`](plugin/README.md) for the full Prompt Evolution Pipeline documentation.
 
+### Source Provenance (Phase G)
+- **Two-pass extraction** — Pass 1 extracts entities per small chunk (~1500 chars) for granular provenance; Pass 2 extracts relationships per section (~2-5K chars) for sufficient context
+- **Click-to-source** — every relationship stores the originating section header and source text snippet (max 200 chars), enabling traceability in the D3.js visualization
+- **Entity-chunk mapping** — N:M junction table (`entity_chunks`) tracks which document chunks produced each entity, with source text excerpts
+- **Discarded relations tracking** — relationships referencing unknown entities are stored in `discarded_relations` instead of creating stubs, preserving audit trail
+- **Canonical ID resolution** — Pass 2 uses a global canonical_id_map combining local entities and EntityRegistry top-N entries for cross-document relationship extraction
+
 ### Active Memory Integration
 - OpenClaw plugin automatically injects wiki hits into every LLM response
 - Scope-gated results (private/family/public) based on user authorization
