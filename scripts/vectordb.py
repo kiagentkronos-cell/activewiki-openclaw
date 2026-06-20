@@ -24,6 +24,7 @@ import sys
 import time
 import traceback
 import urllib.request
+import requests
 from datetime import timezone
 from pathlib import Path
 
@@ -2528,22 +2529,20 @@ def _ollama_extract(
         "temperature": llm_temperature(_CONFIG),
         "max_tokens": 8192,
         "thinking": "off",  # vLLM: prevents » thinking tags in JSON output
+        "response_format": {"type": "json_object"},
     }
 
     last_err: Optional[Exception] = None
     raw = ''
     for attempt in range(RETRY_MAX):
         try:
-            req = urllib.request.Request(
+            resp = requests.post(
                 f"{VLLM_URL}/chat/completions",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=3600,  # 3600s total (connect+read)
             )
-            with urllib.request.urlopen(req, timeout=3600) as resp:
-                raw_bytes = resp.read()
-                if not raw_bytes:
-                    raise ValueError("vLLM returned 200 OK with empty body")
-                body = json.loads(raw_bytes.decode("utf-8"))
+            resp.raise_for_status()
+            body = resp.json()
             msg = body["choices"][0]["message"]
             raw = (msg.get("content") or msg.get("reasoning") or "").strip()
 
@@ -2561,15 +2560,15 @@ def _ollama_extract(
                 del result["entities"]
             return result
 
-        except urllib.error.HTTPError as e:
+        except requests.exceptions.HTTPError as e:
             detail = ""
             try:
-                detail = e.read().decode("utf-8", errors="replace")[:200]
+                detail = e.response.text[:200] if e.response else ""
             except Exception:
                 pass
             last_err = e
             log("warn",
-                f"vLLM HTTP {e.code} (attempt {attempt + 1}/{RETRY_MAX}): {detail}",
+                f"vLLM HTTP {e.response.status_code if e.response else '?'} (attempt {attempt + 1}/{RETRY_MAX}): {detail}",
                 stderr=True)
             if attempt < RETRY_MAX - 1:
                 time.sleep(RETRY_BASE * (2 ** attempt))
@@ -3249,16 +3248,13 @@ Erstelle Label und Summary als JSON."""
     last_err: Optional[Exception] = None
     for attempt in range(RETRY_MAX):
         try:
-            req = urllib.request.Request(
+            resp = requests.post(
                 f"{VLLM_URL}/chat/completions",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=(10, 300),  # 10s connect, 300s read
             )
-            with urllib.request.urlopen(req, timeout=3600) as resp:
-                raw_bytes = resp.read()
-                if not raw_bytes:
-                    raise ValueError("vLLM returned 200 OK with empty body")
-                body = json.loads(raw_bytes.decode("utf-8"))
+            resp.raise_for_status()
+            body = resp.json()
             msg = body["choices"][0]["message"]
             # qwen3.6 schiebt Output manchmal ins "reasoning"-Field statt "content"
             raw = msg.get("content") or msg.get("reasoning") or ""
