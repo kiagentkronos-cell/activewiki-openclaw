@@ -2527,8 +2527,8 @@ def _ollama_extract(
             {"role": "user", "content": f"Extrahiere aus:\n\n{text}"},
         ],
         "temperature": llm_temperature(_CONFIG),
-        "max_tokens": 8192,
-        "thinking": "off",  # vLLM: prevents » thinking tags in JSON output
+        "max_tokens": llm_max_tokens(_CONFIG),
+        "chat_template_kwargs": {"enable_thinking": False},  # vLLM: prevents thinking tags in JSON output
         "response_format": {"type": "json_object"},
     }
 
@@ -3240,7 +3240,7 @@ Erstelle Label und Summary als JSON."""
             {"role": "user", "content": user_prompt},
         ],
         "temperature": llm_temperature(_CONFIG),
-        "max_tokens": 2048,
+        "max_tokens": llm_max_tokens(_CONFIG),
         "response_format": _SCHEMA_COMMUNITY_SUMMARY,
         "chat_template_kwargs": {"enable_thinking": False},  # vLLM: prevents thinking tags in JSON output
     }
@@ -4626,7 +4626,8 @@ def _llm_is_duplicate(direction_new, direction_existing):
                 },
             ],
             "temperature": 0.1,
-            "max_tokens": 512,
+            "max_tokens": llm_max_tokens(_CONFIG),
+            "chat_template_kwargs": {"enable_thinking": False},  # vLLM: prevents thinking tags in JSON output
         }
         resp = urllib.request.urlopen(
             urllib.request.Request(url, json.dumps(payload).encode(), {"Content-Type": "application/json"}),
