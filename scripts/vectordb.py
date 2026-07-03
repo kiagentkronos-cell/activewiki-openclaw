@@ -2738,6 +2738,10 @@ def process_page(
     added = 0
 
     for ent in all_entities:
+        # Skip malformed entities (LLM sometimes returns strings instead of dicts)
+        if not isinstance(ent, dict):
+            log("warn", f"  [phase-g] Skipping malformed entity (expected dict, got {type(ent).__name__}): {repr(ent)[:100]}", stderr=True)
+            continue
         orig_id = ent.get("id", _slugify(ent.get("label", "")))
         stable_id = _stable_entity_id(
             ent.get("type", "CONCEPT"),
