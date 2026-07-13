@@ -3873,6 +3873,22 @@ def _entities_to_json(
             ],
         }
 
+        # Community membership (graceful if tables don't exist yet)
+        try:
+            comm_rows = conn.execute(
+                "SELECT c.id, c.label FROM communities c "
+                "JOIN community_members cm ON c.id = cm.community_id "
+                "WHERE cm.entity_id = ?",
+                (eid,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            comm_rows = []
+        if comm_rows:
+            entry["communities"] = [
+                {"community_id": cid, "community_label": clabel}
+                for cid, clabel in comm_rows
+            ]
+
         # Phase 2B: attach rationale nodes (incoming ERKLÄRT_MIT/WEGEN/HINTET_AUF from RATIONALE entities)
         if with_rationale:
             rationale_rows = conn.execute(
@@ -4004,6 +4020,19 @@ def cmd_graph_search(
                 log("info", f"    {desc}")
             if page:
                 log("info", f"    page: {page}")
+
+            # Community membership (graceful if tables don't exist yet)
+            try:
+                comm_rows = conn.execute(
+                    "SELECT c.id, c.label FROM communities c "
+                    "JOIN community_members cm ON c.id = cm.community_id "
+                    "WHERE cm.entity_id = ?",
+                    (eid,),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                comm_rows = []
+            for cid, clabel in comm_rows:
+                log("info", f"    community: {clabel} ({cid[:8]}...)")
 
             rels_out = conn.execute(
                 "SELECT r.relation_type, r.description, e.label, r.confidence "
