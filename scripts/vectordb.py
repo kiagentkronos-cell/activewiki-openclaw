@@ -1199,6 +1199,12 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.commit()
         _record_graph_migration(conn, "v3_relationships_valid_until")
 
+    # Add valid_from column to relationships if not present (temporal tracking)
+    if not _has_column(conn, "relationships", "valid_from"):
+        conn.execute("ALTER TABLE relationships ADD COLUMN valid_from TEXT DEFAULT NULL")
+        conn.commit()
+        _record_graph_migration(conn, "v10_relationships_valid_from")
+
     # Add confidence column to relationships if not present (Phase 2A: Confidence Tags)
     if not _has_column(conn, "relationships", "confidence"):
         conn.execute("ALTER TABLE relationships ADD COLUMN confidence TEXT DEFAULT 'inferred'")
@@ -3833,6 +3839,8 @@ def _entities_to_json(
     conn: sqlite3.Connection,
     rows,
     with_rationale: bool = False,
+    since: str | None = None,
+    until: str | None = None,
 ) -> list[dict]:
     """Build the graph JSON shape (entity + 1-hop relations) for rows of
     (id, label, entity_type, description, wiki_page). Shared by graph search/pages.
@@ -3842,20 +3850,28 @@ def _entities_to_json(
         rows: Rows of (id, label, entity_type, description, wiki_page).
         with_rationale: If True, also include incoming ERKLÄRT_MIT/WEGEN/HINTET_AUF
             relations from RATIONALE entities as a "rationale" field.
+        since: Only include relations starting on or after this date.
+        until: Only include relations ending on or before this date.
     """
     result = []
     for eid, label, etype, desc, page in rows:
+        rels_out_where, rels_out_params = _temporal_filter(
+            "WHERE r.source_id = ? AND r.valid_until IS NULL", [eid], since, until
+        )
         rels_out = conn.execute(
-            "SELECT r.relation_type, r.description, e.label, r.confidence "
+            "SELECT r.relation_type, r.description, e.label, r.confidence, r.valid_from, r.valid_until "
             "FROM relationships r JOIN entities e ON r.target_id = e.id "
-            "WHERE r.source_id = ? AND r.valid_until IS NULL",
-            (eid,),
+            + rels_out_where,
+            rels_out_params,
         ).fetchall()
+        rels_in_where, rels_in_params = _temporal_filter(
+            "WHERE r.target_id = ? AND r.valid_until IS NULL", [eid], since, until
+        )
         rels_in = conn.execute(
-            "SELECT r.relation_type, r.description, e.label, r.confidence "
+            "SELECT r.relation_type, r.description, e.label, r.confidence, r.valid_from, r.valid_until "
             "FROM relationships r JOIN entities e ON r.source_id = e.id "
-            "WHERE r.target_id = ? AND r.valid_until IS NULL",
-            (eid,),
+            + rels_in_where,
+            rels_in_params,
         ).fetchall()
 
         entry: dict[str, object] = {
@@ -3864,12 +3880,14 @@ def _entities_to_json(
             "description": desc or "",
             "wiki_page": page or "",
             "outgoing": [
-                {"relation_type": rt, "target": tl, "description": rd or "", "confidence": conf or DEFAULT_CONFIDENCE}
-                for rt, rd, tl, conf in rels_out[:10]
+                {"relation_type": rt, "target": tl, "description": rd or "", "confidence": conf or DEFAULT_CONFIDENCE,
+                 "valid_from": vf, "valid_until": vu}
+                for rt, rd, tl, conf, vf, vu in rels_out[:10]
             ],
             "incoming": [
-                {"relation_type": rt, "source": sl, "description": rd or "", "confidence": conf or DEFAULT_CONFIDENCE}
-                for rt, rd, sl, conf in rels_in[:10]
+                {"relation_type": rt, "source": sl, "description": rd or "", "confidence": conf or DEFAULT_CONFIDENCE,
+                 "valid_from": vf, "valid_until": vu}
+                for rt, rd, sl, conf, vf, vu in rels_in[:10]
             ],
         }
 
@@ -3891,19 +3909,21 @@ def _entities_to_json(
 
         # Phase 2B: attach rationale nodes (incoming ERKLÄRT_MIT/WEGEN/HINTET_AUF from RATIONALE entities)
         if with_rationale:
+            rat_where, rat_params = _temporal_filter(
+                "WHERE r.target_id = ? AND r.valid_until IS NULL AND r.relation_type IN ('ERKLÄRT_MIT', 'WEGEN', 'HINTET_AUF') AND e.entity_type = 'RATIONALE'",
+                [eid], since, until
+            )
             rationale_rows = conn.execute(
-                "SELECT r.relation_type, r.description, e.label, r.confidence "
+                "SELECT r.relation_type, r.description, e.label, r.confidence, r.valid_from, r.valid_until "
                 "FROM relationships r JOIN entities e ON r.source_id = e.id "
-                "WHERE r.target_id = ? "
-                "AND r.valid_until IS NULL "
-                "AND r.relation_type IN ('ERKLÄRT_MIT', 'WEGEN', 'HINTET_AUF') "
-                "AND e.entity_type = 'RATIONALE'",
-                (eid,),
+                + rat_where,
+                rat_params,
             ).fetchall()
             if rationale_rows:
                 entry["rationale"] = [
-                    {"relation_type": rt, "source": sl, "description": rd or "", "confidence": conf or DEFAULT_CONFIDENCE}
-                    for rt, rd, sl, conf in rationale_rows[:5]
+                    {"relation_type": rt, "source": sl, "description": rd or "", "confidence": conf or DEFAULT_CONFIDENCE,
+                     "valid_from": vf, "valid_until": vu}
+                    for rt, rd, sl, conf, vf, vu in rationale_rows[:5]
                 ]
 
         result.append(entry)
@@ -3963,11 +3983,43 @@ def cmd_graph_pages(pages: list[str], as_json: bool = False, scopes: list[str] |
         conn.close()
 
 
+def _temporal_tag(valid_from: str | None, valid_until: str | None) -> str:
+    """Format temporal info for a relation.
+
+    Returns:
+        '' if no temporal info.
+        ' [seit YYYY-MM-DD]' if only valid_from.
+        ' [YYYY-MM-DD bis YYYY-MM-DD] ⚠️ historisch' if both set.
+    """
+    if valid_from and valid_until:
+        return f" [{valid_from} bis {valid_until}] ⚠️ historisch"
+    if valid_from:
+        return f" [seit {valid_from}]"
+    return ""
+
+
+def _temporal_filter(where: str, params: list, since: str | None = None, until: str | None = None) -> tuple[str, list]:
+    """Append temporal filter clauses to a WHERE clause.
+
+    NULL values always pass (relation without date is timeless).
+    """
+    extra_params = list(params)
+    if since:
+        where += " AND (r.valid_from IS NULL OR r.valid_from >= ?)"
+        extra_params.append(since)
+    if until:
+        where += " AND (r.valid_until IS NULL OR r.valid_until <= ?)"
+        extra_params.append(until)
+    return where, extra_params
+
+
 def cmd_graph_search(
     query: str,
     as_json: bool = False,
     scopes: list[str] | None = None,
     with_rationale: bool = False,
+    since: str | None = None,
+    until: str | None = None,
 ) -> None:
     """Simple graph lookup: find entities matching query + their 1-hop relations.
 
@@ -4008,7 +4060,7 @@ def cmd_graph_search(
         return
 
     if as_json:
-        result = _entities_to_json(conn, rows, with_rationale=with_rationale)
+        result = _entities_to_json(conn, rows, with_rationale=with_rationale, since=since, until=until)
         conn.close()
         print(json.dumps(result, ensure_ascii=False))
     else:
@@ -4034,52 +4086,62 @@ def cmd_graph_search(
             for cid, clabel in comm_rows:
                 log("info", f"    community: {clabel} ({cid[:8]}...)")
 
+            rels_out_where, rels_out_params = _temporal_filter(
+                "WHERE r.source_id = ? AND r.valid_until IS NULL", [eid], since, until
+            )
             rels_out = conn.execute(
-                "SELECT r.relation_type, r.description, e.label, r.confidence "
+                "SELECT r.relation_type, r.description, e.label, r.confidence, r.valid_from, r.valid_until "
                 "FROM relationships r JOIN entities e ON r.target_id = e.id "
-                "WHERE r.source_id = ? AND r.valid_until IS NULL",
-                (eid,),
+                + rels_out_where,
+                rels_out_params,
             ).fetchall()
 
+            rels_in_where, rels_in_params = _temporal_filter(
+                "WHERE r.target_id = ? AND r.valid_until IS NULL", [eid], since, until
+            )
             rels_in = conn.execute(
-                "SELECT r.relation_type, r.description, e.label, r.confidence "
+                "SELECT r.relation_type, r.description, e.label, r.confidence, r.valid_from, r.valid_until "
                 "FROM relationships r JOIN entities e ON r.source_id = e.id "
-                "WHERE r.target_id = ? AND r.valid_until IS NULL",
-                (eid,),
+                + rels_in_where,
+                rels_in_params,
             ).fetchall()
 
             if rels_out:
                 log("info", f"    \u2192 outgoing ({len(rels_out)}):")
-                for rtype, rdesc, target_label, conf in rels_out[:10]:
+                for rtype, rdesc, target_label, conf, vf, vu in rels_out[:10]:
                     conf_display = conf or DEFAULT_CONFIDENCE
-                    log("info", f"      \u2514\u2500 {rtype} \u2192 {target_label} [confidence={conf_display}]")
+                    temporal = _temporal_tag(vf, vu)
+                    log("info", f"      \u2514\u2500 {rtype} \u2192 {target_label} [confidence={conf_display}]{temporal}")
                     if rdesc:
                         log("info", f"         {rdesc}")
 
             if rels_in:
                 log("info", f"    \u2190 incoming ({len(rels_in)}):")
-                for rtype, rdesc, source_label, conf in rels_in[:10]:
+                for rtype, rdesc, source_label, conf, vf, vu in rels_in[:10]:
                     conf_display = conf or DEFAULT_CONFIDENCE
-                    log("info", f"      \u2514\u2500 {source_label} {rtype} [confidence={conf_display}]")
+                    temporal = _temporal_tag(vf, vu)
+                    log("info", f"      \u2514\u2500 {source_label} {rtype} [confidence={conf_display}]{temporal}")
                     if rdesc:
                         log("info", f"         {rdesc}")
 
             # Phase 2B: show rationale nodes
             if with_rationale:
+                rat_where, rat_params = _temporal_filter(
+                    "WHERE r.target_id = ? AND r.valid_until IS NULL AND r.relation_type IN ('ERKLÄRT_MIT', 'WEGEN', 'HINTET_AUF') AND e.entity_type = 'RATIONALE'",
+                    [eid], since, until
+                )
                 rationale_rows = conn.execute(
-                    "SELECT r.relation_type, r.description, e.label, r.confidence "
+                    "SELECT r.relation_type, r.description, e.label, r.confidence, r.valid_from, r.valid_until "
                     "FROM relationships r JOIN entities e ON r.source_id = e.id "
-                    "WHERE r.target_id = ? "
-                    "AND r.valid_until IS NULL "
-                    "AND r.relation_type IN ('ERKLÄRT_MIT', 'WEGEN', 'HINTET_AUF') "
-                    "AND e.entity_type = 'RATIONALE'",
-                    (eid,),
+                    + rat_where,
+                    rat_params,
                 ).fetchall()
                 if rationale_rows:
                     log("info", f"    \u2753 rationale ({len(rationale_rows)}):")
-                    for rtype, rdesc, source_label, conf in rationale_rows[:5]:
+                    for rtype, rdesc, source_label, conf, vf, vu in rationale_rows[:5]:
                         conf_display = conf or DEFAULT_CONFIDENCE
-                        log("info", f"      \u2514\u2500 {source_label} {rtype} [confidence={conf_display}]")
+                        temporal = _temporal_tag(vf, vu)
+                        log("info", f"      \u2514\u2500 {source_label} {rtype} [confidence={conf_display}]{temporal}")
                         if rdesc:
                             log("info", f"         {rdesc}")
 
@@ -4864,6 +4926,10 @@ def main() -> int:
         help="Comma-separated list of scopes to filter by")
     sp_gs.add_argument("--with-rationale", action="store_true",
         help="Also show Rationale nodes (Why-Nodes) explaining facts")
+    sp_gs.add_argument("--since", type=str, default=None,
+        help="Only show relations starting on or after YYYY-MM-DD (NULL dates always pass)")
+    sp_gs.add_argument("--until", type=str, default=None,
+        help="Only show relations ending on or before YYYY-MM-DD (NULL dates always pass)")
 
     # graph pages (vector→graph bridge: entities anchored on given wiki pages)
     sp_gp = graph_sub.add_parser("pages", help="Entities (+1-hop) for given wiki pages")
@@ -5047,7 +5113,8 @@ def main() -> int:
             if getattr(args, "scopes", None):
                 scopes = [s.strip() for s in args.scopes.split(",")]
             with_rat = getattr(args, "with_rationale", False)
-            cmd_graph_search(args.query, as_json=getattr(args, "json", False), scopes=scopes, with_rationale=with_rat)
+            cmd_graph_search(args.query, as_json=getattr(args, "json", False), scopes=scopes, with_rationale=with_rat,
+                             since=getattr(args, "since", None), until=getattr(args, "until", None))
         elif gc == "pages":
             scopes = None
             if getattr(args, "scopes", None):
