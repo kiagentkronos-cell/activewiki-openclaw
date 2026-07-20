@@ -735,6 +735,7 @@ def split_by_h2(body: str) -> list[tuple[str, str]]:
     """Split markdown body by ## headings into (section_label, section_text) pairs.
 
     Fallback: if no ## headings found and body > 5000 chars, split by paragraphs.
+    Max-size: sections > 15000 chars are split by ##-subheadings or paragraphs.
     """
     parts = H2_SPLIT_RE.split(body.strip())
     sections: list[tuple[str, str]] = []
@@ -750,7 +751,13 @@ def split_by_h2(body: str) -> list[tuple[str, str]]:
         else:
             label = "_preamble_"
             sec_body = part
-        sections.append((label, sec_body))
+
+        # Max-size check: split oversized sections further
+        if len(sec_body) > 15000:
+            sub = _split_oversized_section(label, sec_body)
+            sections.extend(sub)
+        else:
+            sections.append((label, sec_body))
 
     # Fallback: no ## headings found and body is large → split by paragraphs
     if len(sections) <= 1 and len(body) > 5000:
@@ -759,6 +766,55 @@ def split_by_h2(body: str) -> list[tuple[str, str]]:
             sections = [(f"_para_{i}", p) for i, p in enumerate(paragraphs)]
 
     return sections
+
+
+def _split_oversized_section(label: str, body: str) -> list[tuple[str, str]]:
+    """Split a section that exceeds 15K chars into smaller pieces.
+
+    Strategy 1: Split by ### headings (sub-sections).
+    Strategy 2: Split by double-newline paragraphs, grouped to ~8K each.
+    """
+    # Strategy 1: try ### sub-headings
+    h3_parts = re.split(r"(?=^###\s)", body, flags=re.MULTILINE)
+    if len(h3_parts) > 1:
+        result: list[tuple[str, str]] = []
+        for i, part in enumerate(h3_parts):
+            part = part.strip()
+            if not part:
+                continue
+            if part.startswith("### "):
+                first_nl = part.find("\n")
+                sub_label = part[4:first_nl].strip() if first_nl > 0 else part[4:].strip()
+                sub_body = part[first_nl + 1:].strip() if first_nl > 0 else ""
+            else:
+                sub_label = f"{label} (Teil {i})"
+                sub_body = part
+            result.append((sub_label, sub_body))
+        if result:
+            return result
+
+    # Strategy 2: paragraph-based grouping (~8K per group)
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+    if len(paragraphs) <= 1:
+        return [(label, body)]
+
+    result = []
+    current_parts = []
+    current_size = 0
+    group = 0
+    for p in paragraphs:
+        if current_size + len(p) > 8000 and current_parts:
+            result.append((f"{label} (Teil {group})", "\n\n".join(current_parts)))
+            current_parts = [p]
+            current_size = len(p)
+            group += 1
+        else:
+            current_parts.append(p)
+            current_size += len(p)
+    if current_parts:
+        result.append((f"{label} (Teil {group})", "\n\n".join(current_parts)))
+
+    return result if result else [(label, body)]
 
 
 def extract_source_sentence(text: str, entity_dict: dict) -> str:
@@ -2428,72 +2484,113 @@ def _fix_json(raw: str) -> str | None:
 #  Graph: Ollama Entity Extraction
 # ═══════════════════════════════════════════════════════════════════════
 
-# Phase G: Entities-only extraction prompt (Pass 1)
-EXTRACTION_ENTITIES_ONLY_PROMPT = """<SOURCE_START>
-Du bist ein KI-Assistent der Entities und ihre Eigenschaften aus deutschen Texten extrahiert.
+# ── Unified extraction prompt (single-pass: entities + relations per section) ──
+# Replaces the old Phase G two-pass prompts (entities-only + relations-only).
+# Based on EXTRACTION_SYSTEM_PROMPT with section-specific constraints.
+EXTRACTION_UNIFIED_PROMPT = """\
+Du extrahiere Entities und Beziehungen für einen Knowledge Graph aus einem Textabschnitt.
 
-## Ausgabeformat
-JSON mit folgendem Schema:
+## RELATIONSHIP-FIRST (wichtigste Regel!)
+Extrahiere NUR Triples (Entity A → Relation → Entity B). Keine isolierten Entities ohne Beziehung.
+Eine Entity erscheint nur, weil sie in einer Relation vorkommt.
+
+## ENTITY-TYPEN (erlaubt)
+PERSON - konkrete Namen (Vor- + Nachname)
+ORGANIZATION - Unternehmen, Behörden, Institutionen mit vollem Namen
+LOCATION - konkrete Orte (Orte, Regionen, Länder) mit Bedeutung im Kontext
+DOCUMENT - konkrete Dokumente mit Titel/Nummer (Urteile, Gesetze, Verträge)
+PROPERTY - konkrete Grundstücke/Immobilien mit Adresse oder Flurnummer
+FACILITY - konkrete Gebäude, Anlagen, Infrastruktur
+CONCEPT - NUR klar definierte Fachkonzepte, nicht jedes Nomen!
+DATE - konkrete Daten die Handlungen markieren (Ereignisdaten, Fristen)
+MONEY - konkrete Geldbeträge mit Kontext (Miete, Kaufpreis, Darlehen)
+EVENT - konkrete Events (Gerichtstermine, Baubeginn, Unterschriften)
+RATIONALE - Ursache/Grund/Erläuterung (nur bei einfachen Fällen)
+
+## CONCEPT-FILTER (verschärft!)
+CONCEPT nur wenn es ein fachlicher Begriff ist mit spezifischer Bedeutung.
+NICHT: "Markt", "Immobilien", "Analyse", "Wirtschaft", "Vertrag" — das ist Rauschen.
+JA: "E3DC Hauskraftwerk S10", "Schnitzel Wiener Art", "Nebenkostenverordnung" — spezifisch.
+
+## NOISE - NICHT EXTRAHIEREN
+- Frontmatter-Tags/Keywords ("nuts-3", "trends") → Metadaten
+- Generische Begriffe → zu allgemein
+- Hash-Referenzen → technisch irrelevant
+- Adjektive/Substantive ohne Eigenname
+- Abschnittstiteln ohne konkreten Namen
+- Platzhalter-Labels wie "Haupt-Entity der Wiki-Seite XYZ"
+
+## RELATION-TYPEN (spezifisch zuerst!)
+BESITZT, VERTRAG_MIT, BEFINDET_SICH_IN, BEZOGEN_AUF, TEIL_VON
+FINANZIERT_VON, VERSICHERT_BEI, MIETET_BEI, VERMIETET_AN
+ARBEITET_BEI, KREDIT_BEI, HAT_KOMPONENTE, HAT_EIGENSCHAFT
+REFERENZIERT, STAMMT_VON, KOSTET
+ERKLÄRT_MIT, HINTET_AUF, WEGEN
+FUSIONIERTE_MIT, NACHFOLGER_VON, UMGENANNT_ZU, AUFGETEILT_IN
+BEZOGEN_AUF nur als absoluter letzter Ausweg (< 10% aller Relations)
+
+## REGELN
+1. Maximum 20 Entities pro Abschnitt. Weniger ist besser.
+2. Maximum 15 Relationships pro Abschnitt.
+3. Relations MÜSSEN spezifisch sein — erst spezifischen Typ prüfen, dann Fallback.
+4. Keine Spekulation — nur was explizit im Text steht.
+5. IDs: kebab-case, eindeutig, kurz. Labels auf Deutsch.
+6. Description max 25 Zeichen.
+7. Confidence: extracted (direkt im Text), inferred (Schlussfolgerung), weak (unsicher).
+8. Nur gültiges JSON — kein Markdown, kein Text davor/danach.
+
+## CANONICAL NAMES
+- Kürzesten sinnvollen Namen: "Musterort" statt "projekt-musterort"
+- Gebräuchlichen Namen: "Max" statt "Max Mustermann" (wenn bekannt)
+- Bekannte Entities aus der Liste unten → vorhandene ID nutzen!
+
+## ANTWORTFORMAT (BINDEND!)
 {{
   "entities": [
-    {{
-      "id": "lowercase-with-hyphens",
-      "label": "Anzeigename",
-      "type": "ORG|PERSON|LOCATION|CONCEPT|DOCUMENT|EVENT",
-      "description": "Kurze Beschreibung (1-2 Sätze)",
-      "rationale_for_entity_id": null  // OPTIONAL: wenn diese Entity eine andere erklärt (Why-Node), ID der erklärten Entity
-    }}
+    {{"id": "kebab-case-id", "label": "Lesbarer Name", "type": "ENTITY_TYPE", "description": "Max 25 Zeichen"}}
+  ],
+  "relationships": [
+    {{"source": "entity_id_a", "target": "entity_id_b", "type": "RELATION_TYPE", "description": "Was verbindet sie", "confidence": "extracted|inferred|weak"}}
   ]
 }}
-
-## Regeln
-- Extrahiere NUR Entities, KEINE Relationships
-- id: lowercase, Hyphens statt Spaces, eindeutig
-- type: Eines der 6 Typen (ORG, PERSON, LOCATION, CONCEPT, DOCUMENT, EVENT)
-- description: 1-2 Sätze, was diese Entity ist
-- rationale_for_entity_id: Nur füllen wenn diese Entity eine Ursache/Erläuterung für eine andere Entity darstellt (Trigger: "weil", "da", "wegen", "aufgrund")
-- Warum-Nodes: Wenn der Text eine Ursache/Erläuterung enthält, extrahiere sie als eigene Entity mit rationale_for_entity_id → ID der Fakten-Entity
-- Max 20 Entities pro Aufruf
-- Keine Halluzinationen — nur was im Text steht
-- Keine Relationships im Output!
-
-Output als JSON. Kein Markdown-Codeblock, kein Text davor/danach.
-<SOURCE_END>
+- Wenn ≥3 Entities: mindestens 1-2 Beziehungen!
+- relationships ist Pflichtfeld — nicht weglassen wenn Entities da sind.
 """
 
-# Phase G: Relations-only extraction prompt (Pass 2)
-EXTRACTION_RELATIONS_ONLY_PROMPT = """<SOURCE_START>
-Du bist ein KI-Assistent der Beziehungen zwischen Entities aus deutschen Texten extrahiert.
 
-## Ausgabeformat
-JSON mit folgendem Schema:
+# Page-Summary-Pass: nach Section-Extraktion + Entity-Resolution prüft der LLM
+# auf verpasste Cross-Section-Relations. Extrahiert NICHT neu — CHECKT nur.
+PAGE_SUMMARY_CHECK_PROMPT = """\
+Du prüfst, ob wichtige Beziehungen zwischen Entities einer Wiki-Seite übersehen wurden.
+
+## PAGE STRUKTUR
+{section_labels}
+
+## BEREITS GEFUNDENE ENTITIES
+{entity_list}
+
+## BEREITS GEFUNDENE RELATIONSHIPS
+{existing_relations}
+
+## AUFGABE
+Prüfe, ob wichtige Beziehungen zwischen den Entities fehlen. Die Seite hat diese Topics — gibt es logische Verbindungen, die nicht erkannt wurden?
+
+Gib NUR neue Relationships zurück, keine Duplikate der bereits gefundenen.
+Maximum 5 neue Relationships.
+
+## ANTWORTFORMAT (BINDEND!)
 {{
   "relationships": [
-    {{
-      "source": "entity-id-aus-canonical-list",
-      "target": "entity-id-aus-canonical-list",
-      "type": "VERBINDUNGSTYP",
-      "description": "Kurze Beschreibung der Beziehung (1-2 Sätze)",
-      "confidence": "confirmed|inferred|weak"
-    }}
+    {{"source": "entity_id_a", "target": "entity_id_b", "type": "RELATION_TYPE", "description": "...", "confidence": "inferred"}}
   ]
 }}
-
-## Regeln
-- Extrahiere NUR Relationships, KEINE Entities
-- Verwende EXAKT die Entity-IDs aus der [CANONICAL_IDS]-Liste — keine neuen IDs erfinden!
-- Wenn eine Entity nicht in der Canonical-Liste ist, verwende sie NICHT
-- relation_type: Verwende etablierte Typen (VERBINDUNG_ZU, BEZOGEN_AUF, TEIL_VON, BESITZT, VERURSACHT, etc.)
-- confidence: "confirmed" wenn explizit im Text, "inferred" wenn logisch abgeleitbar, "weak" wenn unsicher
-- Max 15 Relationships pro Aufruf
-- Keine Halluzinationen — nur was im Text steht
-- Keine Entities im Output!
-
-Output als JSON. Kein Markdown-Codeblock, kein Text davor/danach.
-<SOURCE_END>
+- Wenn keine neuen Relations: "relationships": []
 """
 
 
+# ── Deprecated: Phase G two-pass prompts (kept for backward compat only) ──
+EXTRACTION_ENTITIES_ONLY_PROMPT = EXTRACTION_UNIFIED_PROMPT  # deprecated
+EXTRACTION_RELATIONS_ONLY_PROMPT = EXTRACTION_UNIFIED_PROMPT  # deprecated
 
 
 def _ollama_extract(
@@ -2506,15 +2603,21 @@ def _ollama_extract(
 
     Args:
         text: The markdown body to extract entities from.
-        mode: "full" (both entities+relations), "entities" (entities only),
-              or "relations" (relations only). Phase G two-pass approach.
+        mode: "full" (both entities+relations via EXTRACTION_SYSTEM_PROMPT),
+              "unified" (entities+relations via EXTRACTION_UNIFIED_PROMPT, single-pass),
+              "entities" (entities only, deprecated),
+              "relations" (relations only, deprecated).
         known_entities_text: Pre-formatted Known-Entities section from
             EntityRegistry.to_prompt_section(). Injected into the system
             prompt so the LLM can reuse existing entity IDs.
         canonical_ids_text: Phase G — mandatory canonical IDs for relations mode.
             Enforces that LLM uses exact IDs from Pass 1 / EntityRegistry.
     """
-    if mode == "entities":
+    if mode == "page_summary":
+        system_prompt = PAGE_SUMMARY_CHECK_PROMPT
+    elif mode == "unified":
+        system_prompt = EXTRACTION_UNIFIED_PROMPT
+    elif mode == "entities":
         system_prompt = EXTRACTION_ENTITIES_ONLY_PROMPT
     elif mode == "relations":
         system_prompt = EXTRACTION_RELATIONS_ONLY_PROMPT
@@ -2663,8 +2766,8 @@ def process_page(
     """Process a single wiki page for entity/relationship extraction.
     Returns (entities_added, relations_added).
 
-    Phase G: Two-pass approach — Pass 1 extracts entities per chunk (precise provenance),
-    Pass 2 extracts relations per section (preserving cross-chunk relations).
+    Unified single-pass approach: split by ## sections, extract entities +
+    relationships together via _ollama_extract(mode="unified") per section.
 
     Args:
         filepath: Path to the wiki markdown file.
@@ -2674,7 +2777,7 @@ def process_page(
         autocommit: If True, commit after writes. Set False when caller manages
             the transaction (e.g., update_graph_incremental).
         registry: Optional EntityRegistry for known-entity dedup and
-            prompt injection. When provided, top-30 known entities are
+            prompt injection. When provided, known entities are
             injected into the LLM system prompt, and resolve_entity()
             uses registry lookup as highest priority.
     """
@@ -2698,55 +2801,50 @@ def process_page(
     if dry_run:
         return len(seed_entities), len(seed_relations)
 
+    known_text = registry.to_prompt_section() if registry else None
+
     # ═══════════════════════════════════════════════════════════════════
-    # Phase G: PASS 1 — Entities per Chunk (precise provenance)
+    # Unified: Sections → single LLM call per section (entities + relations)
     # ═══════════════════════════════════════════════════════════════════
-    llm_entities: List[Dict] = []
-    chunk_objs: list[dict] = []  # Store chunk objects for entity_chunks mapping
+    all_llm_entities: List[Dict] = []
+    all_llm_relations: List[Dict] = []
 
     if body.strip():
-        chunks = chunk_markdown(body)
-        known_text = registry.to_prompt_section() if registry else None
-
-        for chunk_idx, (section_label, chunk_text) in enumerate(chunks):
-            # Get or create chunk in DB
-            chunk_row = conn.execute(
-                "SELECT id FROM chunks WHERE scope = ? AND kind = ? AND ref = ? AND chunk_idx = ?",
-                (scope, "wiki", wiki_page, chunk_idx),
-            ).fetchone()
-
-            chunk_id = chunk_row[0] if chunk_row else None
-
-            chunk_objs.append({
-                "chunk_id": chunk_id,
-                "chunk_idx": chunk_idx,
-                "section_label": section_label,
-                "chunk_text": chunk_text,
-            })
-
+        sections = split_by_h2(body)
+        for section_label, section_text in sections:
+            if not section_text.strip():
+                continue
             try:
                 result = _ollama_extract(
-                    chunk_text,
-                    mode="entities",
+                    section_text,
+                    mode="unified",
                     known_entities_text=known_text,
                 )
                 ents = result.get("entities", [])
-                llm_entities.extend(ents)
+                rels = result.get("relationships", [])
+                # Attach section provenance
+                for r in rels:
+                    r["_section"] = section_label
+                    r["_source_text"] = extract_source_sentence(section_text, r)[:200]
+                all_llm_entities.extend(ents)
+                all_llm_relations.extend(rels)
             except RuntimeError as e:
-                log("skip", f"  [skip] Chunk {chunk_idx}: {e}", stderr=True)
+                log("skip", f"  [skip] Section '{section_label}': {e}", stderr=True)
             time.sleep(RATE_LIMIT_S)
 
-    log("llm", f"  [phase-g pass1] {len(llm_entities)} entities from chunks")
+    num_sections = len(sections) if body.strip() else 0
+    log("llm", f"  [unified] {len(all_llm_entities)} entities, {len(all_llm_relations)} relations from {num_sections} sections")
 
-    # 2. Resolve entities (dedup + insert/update) — same as before
-    all_entities = seed_entities + llm_entities
-    id_map: Dict[str, str] = {}
+    # ═══════════════════════════════════════════════════════════════════
+    # Resolve entities (dedup + insert/update)
+    # ═══════════════════════════════════════════════════════════════════
+    all_entities = seed_entities + all_llm_entities
+    id_map: Dict[str, str] = {}  # orig_id → canonical_db_id
     added = 0
 
     for ent in all_entities:
-        # Skip malformed entities (LLM sometimes returns strings instead of dicts)
         if not isinstance(ent, dict):
-            log("warn", f"  [phase-g] Skipping malformed entity (expected dict, got {type(ent).__name__}): {repr(ent)[:100]}", stderr=True)
+            log("warn", f"  Skipping malformed entity (expected dict, got {type(ent).__name__}): {repr(ent)[:100]}", stderr=True)
             continue
         orig_id = ent.get("id", _slugify(ent.get("label", "")))
         stable_id = _stable_entity_id(
@@ -2777,18 +2875,6 @@ def process_page(
             (canonical, wiki_page),
         )
 
-        # Phase G: entity_chunks mapping — find which chunk this entity came from
-        for co in chunk_objs:
-            chunk_text = co["chunk_text"]
-            if ent.get("label") and ent["label"].lower() in chunk_text.lower():
-                chunk_id = co["chunk_id"]
-                if chunk_id:
-                    source_text = extract_source_sentence(chunk_text, ent)[:200]
-                    conn.execute(
-                        "INSERT OR IGNORE INTO entity_chunks(entity_id, chunk_id, source_text) VALUES (?, ?, ?)",
-                        (canonical, chunk_id, source_text),
-                    )
-
         row = conn.execute(
             "SELECT created_at, updated_at FROM entities WHERE id = ?", (canonical,)
         ).fetchone()
@@ -2796,94 +2882,104 @@ def process_page(
             added += 1
 
     # ═══════════════════════════════════════════════════════════════════
-    # Phase G: Build canonical_id_map for Pass 2
+    # Page-Summary-Pass: Cross-Section relation check
     # ═══════════════════════════════════════════════════════════════════
-    canonical_id_map: Dict[str, str] = {}  # label → canonical_id
-    for orig_id, canonical in id_map.items():
-        # Find the label for this entity
-        row = conn.execute(
-            "SELECT label, entity_type FROM entities WHERE id = ?", (canonical,)
-        ).fetchone()
-        if row:
-            canonical_id_map[row[0]] = canonical
-
-    # Add top-N from EntityRegistry (global known entities)
-    if registry:
-        for reg_id, reg_entry in registry.entities.items():
-            label = reg_entry.get("label", "")
-            if label and label not in canonical_id_map:
-                canonical_id_map[label] = reg_entry.get("id", _slugify(label))
-            if len(canonical_id_map) >= 50:
-                break
-
-    # Build canonical_ids_text for Pass 2 prompt
-    canonical_ids_lines = []
-    for label, cid in canonical_id_map.items():
-        canonical_ids_lines.append(f"  - {label} → id: {cid}")
-    canonical_ids_text = (
-        "[CANONICAL_IDS]\n" + "\n".join(canonical_ids_lines) +
-        "\n[END_CANONICAL_IDS]\n\n"
-        "Mandatory: Use EXACTLY the IDs from [CANONICAL_IDS]. Do NOT create new entity IDs."
-    ) if canonical_ids_lines else None
-
-    # ═══════════════════════════════════════════════════════════════════
-    # Phase G: PASS 2 — Relations per Section (cross-chunk relations)
-    # ═══════════════════════════════════════════════════════════════════
-    llm_relations: List[Dict] = []
-
-    if body.strip():
-        sections = split_by_h2(body)
-        for section_label, section_text in sections:
-            if not section_text.strip():
+    summary_relations: List[Dict] = []
+    if len(id_map) >= 3 and body.strip():
+        # Build entity label map (canonical_id → label)
+        entity_labels: Dict[str, str] = {}
+        for ent in all_entities:
+            if not isinstance(ent, dict):
                 continue
-            try:
-                result = _ollama_extract(
-                    section_text,
-                    mode="relations",
-                    known_entities_text=known_text,
-                    canonical_ids_text=canonical_ids_text,
-                )
-                rels = result.get("relationships", [])
-                # Phase G: Attach section provenance to each relation
-                for r in rels:
-                    r["_section"] = section_label
-                    r["_source_text"] = extract_source_sentence(section_text, r)[:200]
-                llm_relations.extend(rels)
-            except RuntimeError as e:
-                log("skip", f"  [skip] Section '{section_label}': {e}", stderr=True)
-            time.sleep(RATE_LIMIT_S)
+            orig_id = ent.get("id", _slugify(ent.get("label", "")))
+            canonical = id_map.get(orig_id)
+            if canonical:
+                entity_labels[canonical] = ent.get("label", orig_id)
 
-    log("llm", f"  [phase-g pass2] {len(llm_relations)} relations from sections")
+        # Section labels for page structure
+        section_labels_str = "\n".join(
+            f"- {label}" for label, _ in sections if label.strip()
+        )
 
-    # 3. Insert relationships (map IDs, ensure FK integrity)
-    all_relations = seed_relations + llm_relations
+        # Entity list for the prompt
+        entity_list_str = "\n".join(
+            f"- {eid}: {entity_labels.get(eid, eid)}"
+            for eid in id_map.values()
+        )
+
+        # Existing relations summary
+        existing_relations_str = "\n".join(
+            f"- {r.get('source', '')} → {r.get('target', '')} [{r.get('type', '')}]"
+            for r in seed_relations + all_llm_relations
+        ) or "(keine)"
+
+        # Format and inject the page summary prompt
+        summary_prompt_body = PAGE_SUMMARY_CHECK_PROMPT.format(
+            section_labels=section_labels_str,
+            entity_list=entity_list_str,
+            existing_relations=existing_relations_str,
+        )
+
+        try:
+            summary_result = _ollama_extract(
+                summary_prompt_body,
+                mode="page_summary",
+            )
+            summary_relations = summary_result.get("relationships", [])
+            # Mark as inferred (found by reasoning, not direct extraction)
+            for r in summary_relations:
+                r["confidence"] = "inferred"
+                r["_section"] = "page_summary"
+                r["_source_text"] = ""
+            if summary_relations:
+                log("llm", f"  [page-summary] {len(summary_relations)} additional relations found")
+        except RuntimeError as e:
+            log("warn", f"  [page-summary] skipped: {e}", stderr=True)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Insert relationships (resolve IDs via id_map, ensure FK integrity)
+    # ═══════════════════════════════════════════════════════════════════
+    all_relations = seed_relations + all_llm_relations + summary_relations
     inserted_rels = 0
 
     for rel in all_relations:
         src_orig = rel.get("source", "")
         tgt_orig = rel.get("target", "")
 
-        # Phase G: Try to resolve via canonical_id_map first, then id_map, then direct
-        src_id = canonical_id_map.get(src_orig, id_map.get(src_orig, src_orig))
-        tgt_id = canonical_id_map.get(tgt_orig, id_map.get(tgt_orig, tgt_orig))
+        # Resolve: try id_map (entities from this page) first, then direct DB ID, then label
+        src_id = id_map.get(src_orig, src_orig)
+        tgt_id = id_map.get(tgt_orig, tgt_orig)
 
-        # Phase G: Validate — if entity not in canonical_id_map and not in id_map, discard
-        if src_orig not in canonical_id_map and src_orig not in id_map:
+        if src_orig not in id_map:
+            direct = conn.execute("SELECT id FROM entities WHERE id = ?", (src_orig,)).fetchone()
+            if direct:
+                src_id = src_orig
+            else:
+                src_id = _resolve_by_label(conn, src_orig) or src_id
+        if tgt_orig not in id_map:
+            direct = conn.execute("SELECT id FROM entities WHERE id = ?", (tgt_orig,)).fetchone()
+            if direct:
+                tgt_id = tgt_orig
+            else:
+                tgt_id = _resolve_by_label(conn, tgt_orig) or tgt_id
+
+        # Validate — if entity still not resolvable, discard
+        if src_orig not in id_map and src_id == src_orig:
             conn.execute(
                 "INSERT INTO discarded_relations(relation_data, reason, page_ref) VALUES (?, ?, ?)",
                 (json.dumps(rel, ensure_ascii=False), "unknown_entity: " + src_orig, wiki_page),
             )
-            log("warn", f"  [phase-g] Discarded relation: unknown source '{src_orig}'", stderr=True)
+            log("warn", f"  Discarded relation: unknown source '{src_orig}'", stderr=True)
             continue
-        if tgt_orig not in canonical_id_map and tgt_orig not in id_map:
+        if tgt_orig not in id_map and tgt_id == tgt_orig:
             conn.execute(
                 "INSERT INTO discarded_relations(relation_data, reason, page_ref) VALUES (?, ?, ?)",
                 (json.dumps(rel, ensure_ascii=False), "unknown_entity: " + tgt_orig, wiki_page),
             )
-            log("warn", f"  [phase-g] Discarded relation: unknown target '{tgt_orig}'", stderr=True)
+            log("warn", f"  Discarded relation: unknown target '{tgt_orig}'", stderr=True)
             continue
 
-        # Phase G: No-Stub-Policy — both entities must exist in DB
+        # No-Stub-Policy — both entities must exist in DB
         for eid in (src_id, tgt_id):
             db_exists = conn.execute(
                 "SELECT 1 FROM entities WHERE id = ?", (eid,)
@@ -2891,9 +2987,9 @@ def process_page(
             if not db_exists:
                 conn.execute(
                     "INSERT INTO discarded_relations(relation_data, reason, page_ref) VALUES (?, ?, ?)",
-                    (json.dumps(rel, ensure_ascii=False), "missing_entity_from_registry: " + eid, wiki_page),
+                    (json.dumps(rel, ensure_ascii=False), "missing_entity: " + eid, wiki_page),
                 )
-                log("warn", f"  [phase-g] Discarded relation: entity '{eid}' not in DB", stderr=True)
+                log("warn", f"  Discarded relation: entity '{eid}' not in DB", stderr=True)
                 break
         else:
             # Both entities exist in DB — proceed with relation insertion
@@ -2936,11 +3032,22 @@ def process_page(
             )
             continue
 
-        # If we get here, the for/else broke — entity was missing, already discarded above
-
     if autocommit:
         conn.commit()
     return added, inserted_rels
+
+
+def _resolve_by_label(conn: sqlite3.Connection, label: str) -> str | None:
+    """Look up an entity DB-ID by label (case-insensitive).
+
+    Used when unified extraction returns entity labels that weren't
+    in the local id_map (e.g., entities created by previous pages).
+    """
+    row = conn.execute(
+        "SELECT id FROM entities WHERE label COLLATE NOCASE = ? "
+        "ORDER BY updated_at DESC LIMIT 1", (label,)
+    ).fetchone()
+    return row[0] if row else None
 # ═══════════════════════════════════════════════════════════════════════
 #  Graph: Incremental Update
 # ═══════════════════════════════════════════════════════════════════════
@@ -3131,7 +3238,7 @@ def build_graph(page_slug: str | None = None, incremental: bool = False) -> None
                 # Record page state
                 full_text = p.read_text(encoding="utf-8")
                 _, body = strip_frontmatter(full_text)
-                body_hash = hashlib.sha256(body.encode()).hexdigest()
+                body_hash = hashlib.sha256(body.encode()).hexdigest()[:16]
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_page_state(wiki_page, body_hash, processed_at) "
                     "VALUES (?, ?, datetime('now'))",
@@ -3181,7 +3288,7 @@ def build_graph(page_slug: str | None = None, incremental: bool = False) -> None
             # Record page state for incremental tracking
             full_text = p.read_text(encoding="utf-8")
             _, body = strip_frontmatter(full_text)
-            body_hash = hashlib.sha256(body.encode()).hexdigest()
+            body_hash = hashlib.sha256(body.encode()).hexdigest()[:16]
             conn.execute(
                 "INSERT OR REPLACE INTO graph_page_state(wiki_page, body_hash, processed_at) "
                 "VALUES (?, ?, datetime('now'))",
