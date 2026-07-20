@@ -21,7 +21,7 @@ Zero manual prompting required.
 ## What You Need
 
 - An OpenClaw instance with a wiki at `/path/to/wikis/`
-- Ollama running locally (for embeddings — `bge-m3` recommended)
+- Ollama running locally (for embeddings — `bge-m3` recommended) + vLLM for entity extraction
 - Python 3.x with numpy + [Docling](https://github.com/DS4SD/docling) (for PDF/DOCX ingestion)
 
 ## Quick Start
@@ -84,11 +84,13 @@ New CLI commands: `graph validate`, `graph diagnose`, `graph evolve`, `graph app
 See [`plugin/README.md`](plugin/README.md) for the full Prompt Evolution Pipeline documentation.
 
 ### Source Provenance (Phase G)
-- **Two-pass extraction** — Pass 1 extracts entities per small chunk (~1500 chars) for granular provenance; Pass 2 extracts relationships per section (~2-5K chars) for sufficient context
+- **Unified section extraction** — entities and relationships are extracted together per `##` section (~2-5K chars) via a relationship-first prompt, eliminating isolated nodes by design
+- **Page summary pass** — after section extraction, an additional LLM pass checks for missing cross-section relationships using the page structure and entity list as context
 - **Click-to-source** — every relationship stores the originating section header and source text snippet (max 200 chars), enabling traceability in the D3.js visualization
 - **Entity-chunk mapping** — N:M junction table (`entity_chunks`) tracks which document chunks produced each entity, with source text excerpts
 - **Discarded relations tracking** — relationships referencing unknown entities are stored in `discarded_relations` instead of creating stubs, preserving audit trail
-- **Canonical ID resolution** — Pass 2 uses a global canonical_id_map combining local entities and EntityRegistry top-N entries for cross-document relationship extraction
+- **Entity resolution** — hybrid matching (embeddings + string similarity + Union-Find deduplication) with label-based cross-page lookup for robust entity identity
+- **Large section handling** — sections exceeding 15K chars are automatically split by `###` headings or paragraphs to stay within context limits
 
 ### Temporal Filtering
 - **Time-bound relationship queries** — `--since YYYY-MM-DD` and `--until YYYY-MM-DD` filter relationships by validity period
