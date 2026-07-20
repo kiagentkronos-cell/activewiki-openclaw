@@ -90,6 +90,11 @@ See [`plugin/README.md`](plugin/README.md) for the full Prompt Evolution Pipelin
 - **Discarded relations tracking** — relationships referencing unknown entities are stored in `discarded_relations` instead of creating stubs, preserving audit trail
 - **Canonical ID resolution** — Pass 2 uses a global canonical_id_map combining local entities and EntityRegistry top-N entries for cross-document relationship extraction
 
+### Temporal Filtering
+- **Time-bound relationship queries** — `--since YYYY-MM-DD` and `--until YYYY-MM-DD` filter relationships by validity period
+- **NULL-safe semantics** — timeless relationships (no date) always pass filters
+- **Active vs. historical** — distinguish current relationships from past ones in graph search output
+
 ### Active Memory Integration
 - OpenClaw plugin automatically injects wiki hits into every LLM response
 - Scope-gated results (private/family/public) based on user authorization
