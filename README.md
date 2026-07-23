@@ -55,6 +55,8 @@ Done. Your agent now searches your wiki in every response.
 - **Rationale entities** — the "why" behind connections is preserved as traceable rationale nodes, rendered as distinctive blue diamond shapes in the D3.js visualization
 - **Community detection** — Louvain algorithm identifies clusters of related entities (e.g., "Real Estate Investment cluster", "Home Automation cluster")
 - **Interactive HTML visualization** — explore the graph visually with D3.js: filter by type, search entities, adjust zoom, export as PNG/SVG
+- **Community sidebar** — clickable legend highlights entities by detected community cluster without forcing layout changes
+- **Live D3 sliders** — 6 real-time controls for graph layout: Repulsion, Link Distance, Node Size, Collision, Center Force, Alpha Decay
 - **God Nodes CLI** — identify the most connected entities: `vectordb.py graph god-nodes --top 10`
 
 ### Entity Resolution (Deduplication)
