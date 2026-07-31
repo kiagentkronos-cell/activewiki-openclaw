@@ -49,15 +49,15 @@ Done. Your agent now searches your wiki in every response.
 - Over-fetching with relevance scoring for optimal context window usage
 
 ### Knowledge Graph
-- **Entity extraction** from documents via LLM (OpenAI) — automatically identifies people, places, organizations, and concepts
+- **Entity extraction** from documents via vLLM (qwen3.6-fp8) — automatically identifies people, places, organizations, and concepts
 - **Relationship mapping** — entities are connected by typed, directed relationships (has_parent_object, part_of_project, owned_by, etc.)
 - **Confidence tags** — every relationship carries a confidence level (`extracted`, `inferred`, `weak`) reflecting how reliably it was extracted. Visualized with color-coded links in the D3.js graph (green/yellow/gray)
 - **Rationale entities** — the "why" behind connections is preserved as traceable rationale nodes, rendered as distinctive blue diamond shapes in the D3.js visualization
-- **Community detection** — Louvain algorithm identifies clusters of related entities (e.g., "Real Estate Investment cluster", "Home Automation cluster")
+- **Community detection** — Leiden algorithm identifies clusters of related entities (e.g., "Real Estate Investment cluster", "Home Automation cluster")
 - **Interactive HTML visualization** — explore the graph visually with D3.js: filter by type, search entities, adjust zoom, export as PNG/SVG
 - **Community sidebar** — clickable legend highlights entities by detected community cluster without forcing layout changes
 - **Live D3 sliders** — 6 real-time controls for graph layout: Repulsion, Link Distance, Node Size, Collision, Center Force, Alpha Decay
-- **Semantic Entity Search** — `graph search` uses embedding-based seed discovery: query is embedded, cosine similarity computed against all entity embeddings, top-10 seeds selected. **Entity-type-specific thresholds** replace the flat 0.5 cutoff: PERSON ≥ 0.80 (strict, prevents name false-positives), ORGANIZATION ≥ 0.75, CONCEPT ≥ 0.50, DOCUMENT ≥ 0.45, default 0.50. LIKE search remains as fallback. New entities get embeddings automatically during `graph build`; backfill existing entities with `graph embed-missing`.
+- **Semantic Entity Search** — `graph search` uses embedding-based seed discovery: query is embedded via Ollama (bge-m3), cosine similarity computed against all entity embeddings, top-10 seeds selected. **Entity-type-specific thresholds** prevent false positives: PERSON ≥ 0.80 (strict, prevents name false-positives), ORGANIZATION ≥ 0.75, CONCEPT ≥ 0.50 (broad for diffuse concepts), DOCUMENT ≥ 0.45, default 0.50. LIKE search remains as fallback when no embedding match. New entities get embeddings automatically during `graph build`; backfill existing entities with `graph embed-missing`.
 - **Multi-hop BFS Expansion (Phase B)** — seeds are expanded over multiple graph hops via breadth-first search (`--max-hops 1-5`, default 1). A visited-set prevents cycles. `--max-results` (default 200, 0 = unlimited) prevents result explosion.
 - **Path Scoring + Evidence Assembly (Phase C)** — relevance score combines seed similarity, hop decay, and confidence: `score = seed_similarity × 0.7^hop × confidence_weight`. The full path from seed to result is reconstructed, with relationships along the path displayed as evidence rationale.
 - **God Nodes CLI** — identify the most connected entities: `vectordb.py graph god-nodes --top 10`

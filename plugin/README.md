@@ -1,6 +1,6 @@
 # ActiveWiki — OpenClaw Wiki Integration
 
-**Status:** Stable/Release | **Last Changed:** 2026-05-30 | **Author:** ActiveWiki Contributors
+**Status:** Stable/Release | **Last Changed:** 2026-07-31 | **Author:** ActiveWiki Contributors
 
 ---
 
@@ -107,7 +107,7 @@ activewiki/
 - Cosine similarity search (numpy)
 - Scope-aware (SQL-level filtering)
 - Knowledge Graph: entities, relationships, communities
-- Semantic Entity Search: `graph search` uses embedding-based seed discovery (cosine similarity, top-10 seeds, threshold ≥ 0.5), LIKE fallback
+- Semantic Entity Search: `graph search` uses embedding-based seed discovery (cosine similarity, top-10 seeds, entity-type-specific thresholds: PERSON ≥0.80, ORGANIZATION ≥0.75, CONCEPT ≥0.50, DOCUMENT ≥0.45), LIKE fallback
 - Incremental updates (content-hash based)
 
 **`ingest.py` — Document Import:**
