@@ -25,8 +25,9 @@ Active Memory Subagent → memory_search
     ↓
 ┌─── memory-core (own memory/ + sessions)
 ├─── activewiki (plugin)
-│       ├── vectordb.py search      (vector chunks)
-│       └── vectordb.py graph pages (KG entities + relationships)
+│       ├── vectordb.py search            (vector chunks)
+│       ├── vectordb.py graph pages       (KG entities + relationships)
+│       └── vectordb.py graph search      (semantic graph search, Phase B/C)
 │       └── merged, scope-gated
 └─── Framework mergeMemorySearchCorpusResults()
     ↓
@@ -74,7 +75,8 @@ activewiki/
 1. Vector search over-fetches (`k = clamp(maxResults×3, min 12, max 30)`)
 2. Extracts `wiki_page` from top hits (max 8 pages)
 3. `graph pages` fetches entities + 1-hop relationships
-4. KG quota: ~⅓ of slots reserved for KG hits
+4. **`graph search` (Patch E)** — semantic graph search via `graphSearchByQuery()`: runs after `graphSearchByPages()`, aggressive limits (`--max-hops 1`, `--max-results 3`, score ≥ 0.3, 15s timeout). Results deduplicated against `graph pages` by `ref`. Reordered to appear first in `allKgHits` so quota-merge includes them. `vectordb.py` logs to stderr, JSON to stdout for clean parsing.
+5. KG quota: ~⅓ of slots reserved for KG hits
 
 **Security measures:**
 - `execFile` instead of `exec` (no shell interpolation)
@@ -105,6 +107,7 @@ activewiki/
 - Cosine similarity search (numpy)
 - Scope-aware (SQL-level filtering)
 - Knowledge Graph: entities, relationships, communities
+- Semantic Entity Search: `graph search` uses embedding-based seed discovery (cosine similarity, top-10 seeds, threshold ≥ 0.5), LIKE fallback
 - Incremental updates (content-hash based)
 
 **`ingest.py` — Document Import:**
