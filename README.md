@@ -21,7 +21,7 @@ Zero manual prompting required.
 ## What You Need
 
 - An OpenClaw instance with a wiki at `/path/to/wikis/`
-- Ollama running locally for embeddings (`bge-m3`) + vLLM (qwen3.6-fp8) for entity extraction
+- Embedding backend (Ollama with `bge-m3` recommended) + any LLM with an OpenAI-compatible API (vLLM, Ollama, OpenAI, etc.)
 - Python 3.x with numpy + [Docling](https://github.com/DS4SD/docling) (for PDF/DOCX ingestion)
 
 ## Quick Start
@@ -49,7 +49,7 @@ Done. Your agent now searches your wiki in every response.
 - Over-fetching with relevance scoring for optimal context window usage
 
 ### Knowledge Graph
-- **Entity extraction** from documents via vLLM (qwen3.6-fp8) — automatically identifies people, places, organizations, and concepts
+- **Entity extraction** from documents via configurable LLM (OpenAI-compatible API) — automatically identifies people, places, organizations, and concepts
 - **Relationship mapping** — entities are connected by typed, directed relationships (has_parent_object, part_of_project, owned_by, etc.)
 - **Confidence tags** — every relationship carries a confidence level (`extracted`, `inferred`, `weak`) reflecting how reliably it was extracted. Visualized with color-coded links in the D3.js graph (green/yellow/gray)
 - **Rationale entities** — the "why" behind connections is preserved as traceable rationale nodes, rendered as distinctive blue diamond shapes in the D3.js visualization
