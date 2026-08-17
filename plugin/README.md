@@ -1,6 +1,6 @@
 # ActiveWiki — OpenClaw Wiki Integration
 
-**Status:** Stable/Release | **Last Changed:** 2026-07-31 | **Author:** ActiveWiki Contributors
+**Status:** Stable/Release | **Last Changed:** 2026-08-17 | **Author:** ActiveWiki Contributors
 
 ---
 
@@ -310,7 +310,9 @@ Copy `activewiki.example.json` to `activewiki.json` and adapt.
 | `llm.ollama_url` | string | http://localhost:11434 | Ollama API for LLM |
 | `llm.url` | string | http://127.0.0.1:8000/v1 | OpenAI-compatible endpoint (vLLM) |
 
-**`llm.temperature`** (float, default `0.5`) — **Important:** Used centrally by all scripts (`vectordb.py`, `distill.py`, `split_pages.py`) via config — no longer hardcoded!
+**`llm.temperature`** (float, default `0.7`) — **Important:** Used centrally by all scripts (`vectordb.py`, `distill.py`, `split_pages.py`) via config — no longer hardcoded!
+
+**`llm.model` has NO code fallback.** If it is missing from `activewiki.json`, the pipeline exits with a clear fatal error instead of silently using a stale hardcoded model name.
 
 **`llm.max_tokens`** (int, default `4096`) — Max tokens per response
 

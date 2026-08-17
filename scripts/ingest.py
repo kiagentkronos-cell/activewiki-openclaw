@@ -9,6 +9,7 @@ folder structure; sources/ stays flat per scope.
 
 Configuration via activewiki.json (see activewiki.example.json).
 """
+import fcntl
 import hashlib
 import json
 import os
@@ -46,6 +47,36 @@ def short_hash(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 16), b""):
             h.update(chunk)
     return h.hexdigest()[:12]
+
+
+def safe_move(src: Path, dest_dir: Path, dest_name: str | None = None) -> Path:
+    """Safe file move with symlink protection and collision handling.
+
+    - Rejects symlinks (prevents path traversal attacks)
+    - Handles name collisions by adding numeric suffix
+    - Returns the final destination path
+    """
+    if dest_name is None:
+        dest_name = src.name
+    
+    # Security: reject symlinks
+    if src.is_symlink():
+        raise ValueError(f"Refusing to move symlink: {src}")
+    
+    dest = dest_dir / dest_name
+    
+    # Handle name collisions
+    if dest.exists():
+        stem = Path(dest_name).stem
+        suffix = Path(dest_name).suffix
+        counter = 1
+        while dest.exists():
+            dest = dest_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+        print(f"[warn] Name collision: {dest_name} → {dest.name}", file=sys.stderr)
+    
+    shutil.move(str(src), str(dest))
+    return dest
 
 
 def safe_fsname(s: str) -> str:
@@ -125,6 +156,33 @@ def resolve_scope_and_path(src: Path) -> tuple[str, list[str]]:
 
 
 def ingest(src: Path) -> Path:
+    # Security: reject symlinks at the very beginning
+    if src.is_symlink():
+        raise ValueError(f"Refusing to process symlink: {src}")
+    
+    # Acquire file lock to prevent race conditions
+    lock_path = PROCESSING / f".{src.name}.lock"
+    PROCESSING.mkdir(exist_ok=True)
+    lock_fd = None
+    try:
+        lock_fd = open(lock_path, 'w')
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        print(f"[skip] {src.name}: another process is already ingesting this file", file=sys.stderr)
+        if lock_fd:
+            lock_fd.close()
+        return src
+    
+    try:
+        return _ingest_unlocked(src)
+    finally:
+        if lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
+        lock_path.unlink(missing_ok=True)
+
+
+def _ingest_unlocked(src: Path) -> Path:
     scope, inbox_path = resolve_scope_and_path(src)
 
     # Guard: files directly in scope root have no inbox_path → legacy mode → prompt explosion
@@ -147,7 +205,7 @@ def ingest(src: Path) -> Path:
     if out_dir.exists():
         dest = processed_subdir / src.name
         if src.resolve() != dest.resolve():
-            shutil.move(str(src), str(dest))
+            safe_move(src, processed_subdir, src.name)
         print(f"[skip] already ingested: {scope}/{source_id}")
         return out_dir
 
@@ -155,7 +213,9 @@ def ingest(src: Path) -> Path:
     # sha-prefix avoids collisions when files of the same basename live in
     # different inbox subfolders and happen to get queued together.
     work = PROCESSING / f"{sha}-{src.name}"
-    shutil.move(str(src), str(work))
+    # Use safe_move to prevent symlink attacks and handle collisions
+    safe_move(src, PROCESSING, f"{sha}-{src.name}")
+    work = PROCESSING / f"{sha}-{src.name}"  # Re-assign in case of collision rename
 
     try:
         result = build_converter().convert(str(work))
@@ -182,6 +242,8 @@ def ingest(src: Path) -> Path:
         )
 
         shutil.move(str(work), str(processed_subdir / src.name))
+        # Note: safe_move not used here because work file is in PROCESSING (trusted location)
+        # and we want to preserve the original name in processed/
         folder_label = "/".join(inbox_path) + "/" if inbox_path else ""
         print(f"[ok] {scope}/{folder_label}{src.name} -> sources/{scope}/{source_id}/")
         return out_dir
@@ -192,7 +254,8 @@ def ingest(src: Path) -> Path:
         (failed_subdir / f"{src.name}.error.log").write_text(
             traceback.format_exc(), encoding="utf-8"
         )
-        shutil.move(str(work), str(failed_subdir / src.name))
+        # Use safe_move for failed files too (work file is in PROCESSING, but dest may have collision)
+        safe_move(work, failed_subdir, src.name)
         folder_label = "/".join(inbox_path) + "/" if inbox_path else ""
         print(f"[fail] {scope}/{folder_label}{src.name} -> failed/{scope}/", file=sys.stderr)
         raise

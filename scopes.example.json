@@ -2,7 +2,7 @@
   "_comment": "Maps sessionKey substrings to allowed scope lists. First matching entry wins. Edit here (no code change needed) to add/remove family members or change access patterns. 'scopes' values must be subset of ['private','family','public']. When extending to new channels (signal, email, etc.), use same substring style: ':<channel>:direct:<id>'. YouTube-Scope entfernt am 2026-05-23.",
   "entries": [
     {
-      "name": "user",
+      "name": "owner",
       "scopes": ["private", "family", "public"],
       "sessionKeyPatterns": [
         ":discord:",

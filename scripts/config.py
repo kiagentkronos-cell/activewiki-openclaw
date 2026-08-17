@@ -146,7 +146,13 @@ def llm_backend(config: dict[str, Any]) -> str:
 
 
 def llm_model(config: dict[str, Any]) -> str:
-    return get(config, "llm.model", "qwen3.6-fp8")
+    model = get(config, "llm.model")
+    if not model:
+        raise SystemExit(
+            "FATAL: llm.model fehlt in activewiki.json — kein Fallback-Modell mehr erlaubt. "
+            "Bitte llm.model setzen (z.B. 'qwen3.8-fp8-fast')."
+        )
+    return model
 
 
 def llm_url(config: dict[str, Any]) -> str:

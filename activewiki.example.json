@@ -29,10 +29,10 @@
 
   "llm": {
     "backend": "ollama",
-    "model": "qwen3.6-fp8-fast",
+    "model": "qwen3.8-fp8-fast",
     "ollama_url": "http://localhost:11434",
     "url": "http://127.0.0.1:8000/v1",
-    "temperature": 0.5,
+    "temperature": 0.7,
     "max_tokens": 4096,
     "_comment": "LLM for distillation (wiki page generation from raw documents). 'url' is the OpenAI-compatible endpoint."
   },

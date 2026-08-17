@@ -192,16 +192,17 @@ def update_backlinks(scope: str, old_slug: str, new_primary_slug: str) -> int:
     
     modified = 0
     # Patterns: (regex, replacement)
+    # Order matters: .md variant MUST come before bare variant
     patterns = [
-        # Markdown links: [text](old-slug) but NOT [text](old-slug.something)
-        (r'\[([^\]]*)\]\(' + re.escape(old_slug) + r'(?![a-zA-Z0-9_-])',
-         rf'[\1]({new_primary_slug})'),
-        # Markdown links with .md: [text](old-slug.md)
+        # Markdown links with .md: [text](old-slug.md) — MUST come first
         (r'\[([^\]]*)\]\(' + re.escape(old_slug) + r'\.md\)',
          rf'[\1]({new_primary_slug}.md)'),
-        # Obsidian wiki-links: [[old-slug]] or [[old-slug|text]]
-        (r'\[\[' + re.escape(old_slug) + r'(?:\|[^\]]*)?\]\]',
-         rf'[[{new_primary_slug}]]'),
+        # Markdown links: [text](old-slug) — capture the closing paren
+        (r'\[([^\]]*)\]\(' + re.escape(old_slug) + r'\)',
+         rf'[\1]({new_primary_slug})'),
+        # Obsidian wiki-links: [[old-slug]] or [[old-slug|text]] — preserve alias
+        (r'\[\[' + re.escape(old_slug) + r'(\|[^\]]*)?\]\]',
+         rf'[[{new_primary_slug}\1]]'),
         # Reference-style links: [text][old-slug]
         (r'\[([^\]]*)\]\[' + re.escape(old_slug) + r'\]',
          rf'[\1][{new_primary_slug}]'),
@@ -485,15 +486,24 @@ def split_page(
     log("info", f"  → {len(pages)} new pages: {', '.join(all_slugs)}")
 
     # Phase 1: Resolve all slugs (safe + collision-free)
-    final_slugs_map: dict[str, str] = {}  # llm_slug → final_slug
-    for p in pages:
+    # Use index-based approach to handle duplicate LLM slugs correctly
+    final_slugs_list: list[str] = []  # index-based, not dict-based
+    seen_slugs: set[str] = set()
+    for idx, p in enumerate(pages):
         p_slug = safe_slug(p["slug"])
         final_slug = resolve_slug_collision(scope, p_slug)
-        final_slugs_map[p["slug"]] = final_slug
+        # Handle in-run duplicates (LLM produced same slug multiple times)
+        while final_slug in seen_slugs:
+            final_slug = resolve_slug_collision(scope, final_slug + "-dup")
+        seen_slugs.add(final_slug)
+        final_slugs_list.append(final_slug)
+    
+    # Build reverse lookup for cross-links (index → final_slug)
+    final_slugs_map: dict[int, str] = {idx: final_slugs_list[idx] for idx in range(len(pages))}
 
     # Phase 2: Build page data with correct cross-links
     pages_to_write: list[dict[str, Any]] = []
-    for p in pages:
+    for idx, p in enumerate(pages):
         p_title = p.get("title", p["slug"])
         p_summary = p.get("summary", "")
         p_topics = p.get("topics", [])
@@ -502,14 +512,14 @@ def split_page(
         if not isinstance(p_sources, list):
             p_sources = [p_sources]
 
-        # Cross-links using final (collision-resolved) slugs
-        other_final_slugs = [final_slugs_map[s] for s in all_slugs if s != p["slug"]]
+        # Cross-links using final (collision-resolved) slugs — exclude current page
+        other_final_slugs = [final_slugs_list[j] for j in range(len(pages)) if j != idx]
         if other_final_slugs and "**Siehe auch:**" not in p_body:
             links = " ".join(f"[{s}]({s}.md)" for s in other_final_slugs)
             p_body = p_body.rstrip() + f"\n\n---\n\n**Siehe auch:** {links}\n"
 
         pages_to_write.append({
-            "slug": final_slugs_map[p["slug"]],
+            "slug": final_slugs_list[idx],
             "title": p_title,
             "summary": p_summary,
             "topics": p_topics,
@@ -539,7 +549,7 @@ def split_page(
 
     # Archive original
     dst = archive_page(scope, slug)
-    log("info", f"  archived {scope}/{slug} → {dst.relative_to(ROOT)}")
+    log("info", f"  archived {scope}/{slug} → {dst}")
 
     # Update backlinks in other wiki pages
     if pages_to_write:

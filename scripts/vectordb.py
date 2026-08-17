@@ -25,7 +25,7 @@ import time
 import traceback
 import urllib.request
 import requests
-from datetime import timezone
+from datetime import timezone, timedelta
 from pathlib import Path
 
 # ── Config loading ───────────────────────────────────────────────────────────
@@ -392,7 +392,7 @@ def log(level: str, message: str, *, stderr: bool = False) -> None:
     # Force single-line: collapse newlines to prevent multi-line log entries
     message = message.replace("\n", "\\n").replace("\r", "\\r")
     line = f"[{ts}] [{level}] {message}"
-    print(line, flush=True)  # always stdout, always flushed
+    print(line, flush=True, file=sys.stderr if stderr else sys.stdout)
 
 
 # ── Entity Extraction System Prompt ──
@@ -561,7 +561,7 @@ Regeln:
 Good: {
   "entities": [
     {"id": "max-mustermann", "label": "Max Mustermann", "type": "PERSON"},
-    {"id": "haus-hauptstr-12a", "label": "Haus Hauptstr. 23b", "type": "PROPERTY"},
+    {"id": "haus-hauptstr-12a", "label": "Haus Hauptstr. 12a", "type": "PROPERTY"},
     {"id": "gruenwald", "label": "Gruenwald", "type": "LOCATION"},
     {"id": "landratsamt-musterstadt", "label": "Landratsamt Musterstadt", "type": "ORGANIZATION"}
   ],
@@ -1314,6 +1314,12 @@ def init_db(conn: sqlite3.Connection) -> None:
         """)
         _record_graph_migration(conn, "v9_discarded_relations")
 
+    # Entity Embeddings: add embedding BLOB column to entities table
+    if not _has_column(conn, "entities", "embedding"):
+        conn.execute("ALTER TABLE entities ADD COLUMN embedding BLOB")
+        conn.commit()
+        _record_graph_migration(conn, "v11_entities_embedding")
+
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1401,8 +1407,8 @@ def _extract_address(label: str) -> tuple[str, str] | None:
     Returns (street_name_normalized, house_number) or None if not address-like.
 
     Examples:
-      "Haus Musterstrasse 32" -> ("musterstrasse", "32")
-      "Musterort Beispielstrasse 12a" -> ("beispielstrasse", "12a")
+      "Haus Musterstrasse 5" -> ("musterstrasse", "5")
+      "Beispielstrasse 12a" -> ("beispielstrasse", "12a")
       "DHH Nr. 4, Beispielstrasse 12" -> ("beispielstrasse", "12")
       "Altgebaeude Hauptstr. 23" -> ("hauptstr", "23")
     """
@@ -1875,7 +1881,7 @@ def _resolve_by_embedding(
 
     Called as Priority 3.5 in resolve_entity(), between label NOCASE
     match and fuzzy match, to catch semantic duplicates that string
-    methods miss (e.g. 'Musterstraße 32' vs 'Haus Musterstraße 32').
+    methods miss (e.g. 'Musterstraße 5' vs 'Haus Musterstraße 5').
 
     Optimisation: batch-embeds all candidate labels in a single Ollama
     call rather than N+1 individual calls. Uses *_cache* (shared across
@@ -2179,6 +2185,40 @@ def _levenshtein_ratio(a: str, b: str) -> int:
     return int((1 - dist / max_len) * 100)
 
 
+def _extract_address_numbers(label: str) -> list[str]:
+    """Extract street numbers from an address label.
+
+    Examples:
+    - "Musterstr 5" → ["32"]
+    - "Musterstr 5a" → ["32a"]
+    - "Musterstraße 5 und 7" → ["5", "7"]
+    """
+    import re
+    # Find street numbers: digits optionally followed by a single letter
+    numbers = re.findall(r'\b(\d+[a-zA-Z]?)\b', label)
+    return numbers
+
+
+def _addresses_differ(label_a: str, label_b: str) -> bool:
+    """Check if two labels have different street numbers.
+
+    Returns True if the addresses are clearly different (different numbers),
+    False if they might be the same address or if no numbers are found.
+    """
+    nums_a = _extract_address_numbers(label_a)
+    nums_b = _extract_address_numbers(label_b)
+
+    # If either has no numbers, we can't determine difference
+    if not nums_a or not nums_b:
+        return False
+
+    # If the number sets differ, the addresses are different
+    if set(nums_a) != set(nums_b):
+        return True
+
+    return False
+
+
 def _fuzzy_match_score(a: str, b: str) -> int:
     """Combined score: max of token-set overlap and levenshtein ratio."""
     return max(_token_set_overlap(a, b), _levenshtein_ratio(a, b))
@@ -2284,6 +2324,11 @@ def resolve_entity(
     best_eid = None
     best_desc = None
     for cid, c_label, c_desc in candidates:
+        # Address guard: if both are PROPERTY/LOCATION with different street numbers,
+        # skip this candidate to avoid merging different addresses
+        if entity_type in ("PROPERTY", "LOCATION") and _addresses_differ(label, c_label):
+            log("dedup", f"  [dedup-skip] '{label}' vs '{c_label}' — different street numbers")
+            continue
         score = _fuzzy_match_score(label, c_label)
         if score > best_score:
             best_score = score
@@ -2311,6 +2356,10 @@ def resolve_entity(
     for eid, e_label, e_type, e_desc in all_entities:
         if e_type == entity_type:
             continue  # already checked in Priority 4
+        # Address guard: if both are PROPERTY/LOCATION with different street numbers,
+        # skip this candidate to avoid merging different addresses
+        if entity_type in ("PROPERTY", "LOCATION") and _addresses_differ(label, e_label):
+            continue
         score = _fuzzy_match_score(label, e_label)
         if score >= CROSS_TYPE_FUZZY_THRESHOLD and score > cross_best_score:
             cross_best_score = score
@@ -2339,6 +2388,13 @@ def resolve_entity(
         "VALUES (?, ?, ?, ?, ?)",
         (new_id, label, entity_type, description, wiki_page),
     )
+    # Compute and store embedding for the new entity label
+    emb = _embed_entity_label(label)
+    if emb is not None:
+        conn.execute(
+            "UPDATE entities SET embedding = ? WHERE id = ?",
+            (emb, new_id),
+        )
     return new_id
 
 
@@ -3145,24 +3201,39 @@ def update_graph_incremental() -> None:
             conn.execute("DELETE FROM entity_pages WHERE wiki_page = ?", (wiki_page,))
             conn.execute("DELETE FROM relationship_pages WHERE wiki_page = ?", (wiki_page,))
 
-            # Clean up orphan entities (no pages reference them anymore)
+            # Clean up orphan entities that were ONLY referenced by this page
+            # (before removal they had no other page references)
             orphan_count = conn.execute("""
                 SELECT COUNT(*) FROM entities e
-                WHERE NOT EXISTS (SELECT 1 FROM entity_pages ep WHERE ep.entity_id = e.id)
-            """).fetchone()[0]
+                WHERE e.id IN (
+                    SELECT ep.entity_id FROM entity_pages ep WHERE ep.wiki_page = ?
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM entity_pages ep2
+                    WHERE ep2.entity_id = e.id AND ep2.wiki_page != ?
+                )
+            """, (wiki_page, wiki_page)).fetchone()[0]
 
             conn.execute("""
-                DELETE FROM entities WHERE NOT EXISTS (
-                    SELECT 1 FROM entity_pages ep WHERE ep.entity_id = entities.id
+                DELETE FROM entities WHERE id IN (
+                    SELECT ep.entity_id FROM entity_pages ep WHERE ep.wiki_page = ?
                 )
-            """)
+                AND NOT EXISTS (
+                    SELECT 1 FROM entity_pages ep2
+                    WHERE ep2.entity_id = entities.id AND ep2.wiki_page != ?
+                )
+            """, (wiki_page, wiki_page))
 
-            # Clean up orphan relationships (no pages reference them anymore)
+            # Clean up orphan relationships that were ONLY referenced by this page
             conn.execute("""
-                DELETE FROM relationships WHERE NOT EXISTS (
-                    SELECT 1 FROM relationship_pages rp WHERE rp.rel_id = relationships.id
+                DELETE FROM relationships WHERE id IN (
+                    SELECT rp.rel_id FROM relationship_pages rp WHERE rp.wiki_page = ?
                 )
-            """)
+                AND NOT EXISTS (
+                    SELECT 1 FROM relationship_pages rp2
+                    WHERE rp2.rel_id = relationships.id AND rp2.wiki_page != ?
+                )
+            """, (wiki_page, wiki_page))
 
             total_entities_removed += orphan_count
             total_relations_removed += old_rels
@@ -3323,6 +3394,22 @@ def _embed_single(text: str) -> Optional[bytes]:
         return None
     except Exception as e:
         log("warn", f"  [warn] embedding failed: {e}", stderr=True)
+        return None
+
+
+def _embed_entity_label(label: str) -> bytes | None:
+    """Compute an L2-normalized embedding for a single entity label.
+
+    Returns the embedding as numpy float32 bytes (.tobytes()) or None
+    on failure/timeout.  Never raises — graceful degradation.
+    """
+    try:
+        vecs = embed([label])
+        if vecs.size > 0 and np.any(vecs[0]):
+            return vecs[0].tobytes()
+        return None
+    except Exception as e:
+        log("warn", f"  [embed-entity] embedding failed for label '{label[:60]}': {e}", stderr=True)
         return None
 
 
@@ -3892,12 +3979,12 @@ def cmd_graph_validate() -> dict:
             continue
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
-                score = _fuzzy_match_score(all_entities[i][1], all_entities[j][1])
+                score = _fuzzy_match_score(group[i][1], group[j][1])
                 if score >= FUZZY_THRESHOLD:
                     dup_pairs.append({
-                        "a": all_entities[i][1],
-                        "b": all_entities[j][1],
-                        "type": all_entities[i][2],
+                        "a": group[i][1],
+                        "b": group[j][1],
+                        "type": group[i][2],
                         "score": score,
                     })
     if dup_pairs:
@@ -4120,6 +4207,312 @@ def _temporal_filter(where: str, params: list, since: str | None = None, until: 
     return where, extra_params
 
 
+def cmd_graph_embed_missing() -> None:
+    """Backfill embeddings for all entities that still have NULL embedding.
+
+    Finds entities WHERE embedding IS NULL, computes embeddings in batches
+    using the existing batch-embedding pipeline, stores as BLOB, shows progress.
+    Skips failures without aborting.
+    """
+    if not _graph_has_tables():
+        log("error", " Graph not built yet. Run `vectordb.py graph build` first.", stderr=True)
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
+    init_db(conn)
+
+    rows = conn.execute(
+        "SELECT id, label FROM entities WHERE embedding IS NULL AND valid_until IS NULL"
+    ).fetchall()
+
+    if not rows:
+        log("info", "All active entities already have embeddings.")
+        conn.close()
+        return
+
+    total = len(rows)
+    done = 0
+    skipped = 0
+    batch_size = 256
+    log("embed-missing", f"Found {total} entities without embedding — starting backfill (batch={batch_size})...")
+
+    for batch_start in range(0, total, batch_size):
+        batch = rows[batch_start:batch_start + batch_size]
+        labels = [row[1] for row in batch]
+        try:
+            vecs = _embed_entity_labels(labels)
+        except Exception as e:
+            log("warn", f"  [embed-missing] batch failed: {e}", stderr=True)
+            vecs = np.zeros((len(labels), EMBED_DIMS), dtype=np.float32)
+            for idx, (eid, label) in enumerate(batch):
+                try:
+                    single = _embed_entity_label(label)
+                    if single is not None:
+                        vecs[idx] = np.frombuffer(single, dtype=np.float32)
+                except Exception:
+                    pass
+
+        for idx, (eid, label) in enumerate(batch):
+            if np.any(vecs[idx]):
+                conn.execute(
+                    "UPDATE entities SET embedding = ? WHERE id = ?",
+                    (vecs[idx].tobytes(), eid),
+                )
+                done += 1
+            else:
+                skipped += 1
+                log("warn", f"  [embed-missing] skipped '{label[:60]}' ({eid[:8]}...)")
+
+        conn.commit()
+        processed = min(batch_start + batch_size, total)
+        log("embed-missing", f"  Embedding {processed}/{total}... (done={done}, skipped={skipped})")
+
+    conn.close()
+    log("embed-missing", f"Done: {done} embedded, {skipped} skipped out of {total}.")
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Multi-hop BFS + Path Scoring + Evidence Assembly (Phase B + C)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _bfs_expand(
+    seed_ids: list[str],
+    seed_similarities: dict[str, float],
+    conn: sqlite3.Connection,
+    max_hops: int,
+) -> dict[str, dict]:
+    """
+    BFS von Seed-Entities ausgehend (multi-hop).
+
+    Returns:
+        dict[entity_id] = {
+            'row': (id, label, entity_type, description, wiki_page),
+            'hop': int,
+            'path_info': {from_id, rel_type, confidence, source_text, hop} | None,
+            'similarity': float,  # Seed-similarity (for hop 0) or 1.0 (for expanded)
+            'score': float,       # computed relevance score
+        }
+    """
+    result: dict[str, dict] = {}
+
+    # Seeds selbst mit hop=0
+    for sid in seed_ids:
+        row = conn.execute(
+            "SELECT id, label, entity_type, description, wiki_page FROM entities WHERE id=?",
+            (sid,),
+        ).fetchone()
+        if row:
+            sim = seed_similarities.get(sid, 0.5)
+            result[sid] = {
+                'row': row,
+                'hop': 0,
+                'path_info': None,
+                'similarity': sim,
+                'score': round(sim, 4),  # hop 0: score = similarity
+            }
+
+    current_frontier = set(seed_ids)
+
+    for hop in range(1, max_hops + 1):
+        next_frontier: dict[str, dict] = {}  # nid -> best path_info
+
+        for eid in current_frontier:
+            rows = conn.execute("""
+                SELECT
+                    CASE WHEN r.source_id = ? THEN r.target_id ELSE r.source_id END AS neighbor_id,
+                    r.relation_type,
+                    r.confidence,
+                    r.source_text,
+                    r.wiki_page
+                FROM relationships r
+                WHERE (r.source_id = ? OR r.target_id = ?)
+                  AND r.valid_until IS NULL
+            """, (eid, eid, eid)).fetchall()
+
+            for nr in rows:
+                nid = nr[0]
+                if nid in result:
+                    continue  # already visited at a shorter hop
+
+                path_info = {
+                    'from': eid,
+                    'rel_type': nr[1],
+                    'confidence': nr[2],
+                    'source_text': nr[3],
+                    'hop': hop,
+                }
+
+                # Keep the best path (highest confidence) if multiple paths to same node
+                if nid not in next_frontier:
+                    next_frontier[nid] = path_info
+                else:
+                    # Prefer higher confidence
+                    existing_conf = next_frontier[nid]['confidence'] or 'weak'
+                    new_conf = nr[2] or 'weak'
+                    conf_rank = {'extracted': 3, 'inferred': 2, 'weak': 1}
+                    if conf_rank.get(new_conf, 0) > conf_rank.get(existing_conf, 0):
+                        next_frontier[nid] = path_info
+
+        # Commit the new frontier
+        for nid, path_info in next_frontier.items():
+            row = conn.execute(
+                "SELECT id, label, entity_type, description, wiki_page FROM entities WHERE id=?",
+                (nid,),
+            ).fetchone()
+            if row:
+                # Score: parent_similarity * hop_decay * confidence_weight
+                parent = result.get(path_info['from'])
+                parent_sim = parent['similarity'] if parent else 0.5
+                score = _compute_relevance_score(
+                    parent_sim, hop, path_info['confidence'], hop
+                )
+                result[nid] = {
+                    'row': row,
+                    'hop': hop,
+                    'path_info': path_info,
+                    'similarity': parent_sim,
+                    'score': score,
+                }
+
+        current_frontier = set(next_frontier.keys())
+        if not current_frontier:
+            break
+
+    return result
+
+
+def _compute_relevance_score(
+    seed_similarity: float,
+    hop_distance: int,
+    relationship_confidence: str | None,
+    path_length: int,
+) -> float:
+    """
+    Berechne Relevanz-Score für eine Entity basierend auf Pfad.
+
+    - seed_similarity: cosine similarity der Seed-Entity (0-1)
+    - hop_distance: Anzahl Hops vom Seed (0, 1, 2, ...)
+    - relationship_confidence: 'extracted', 'inferred', 'weak'
+    - path_length: Gesamte Pfadlänge (== hop_distance für einzelne Hops)
+    """
+    # Hop-Decay: exponentieller Abfall
+    hop_decay = 0.7 ** hop_distance  # 0: 1.0, 1: 0.7, 2: 0.49, 3: 0.343
+
+    # Confidence-Weight
+    conf_weights = {
+        'extracted': 1.0,
+        'inferred': 0.8,
+        'weak': 0.5,
+        None: 0.6,
+    }
+    conf_weight = conf_weights.get(relationship_confidence, 0.6)
+
+    # Kombinierter Score
+    score = seed_similarity * hop_decay * conf_weight
+    return round(score, 4)
+
+
+def _reconstruct_path(
+    entity_id: str,
+    graph: dict[str, dict],
+    conn: sqlite3.Connection,
+    query: str,
+) -> str:
+    """
+    Rekonstruiere den Pfad vom Query bis zur Entity.
+
+    Format:
+        Query → [0.822] → Seed → [BEZITZT] → Nachbar → [ARBEITET_BEI] → Ziel
+    """
+    info = graph.get(entity_id)
+    if not info:
+        return ""
+
+    if info['hop'] == 0:
+        sim = info['similarity']
+        return f"Query → [{sim:.3f}] → {info['row'][1]}"
+
+    # Pfad zurückverfolgen: entity → parent → parent → ... → seed
+    path_segments = []
+    current_id = entity_id
+    visited = set()
+
+    while current_id in graph and current_id not in visited:
+        visited.add(current_id)
+        node = graph[current_id]
+
+        if node['hop'] == 0:
+            # Seed — Pfadende
+            sim = node['similarity']
+            path_segments.append(f"Query → [{sim:.3f}] → {node['row'][1]}")
+            break
+
+        pi = node['path_info']
+        if pi:
+            parent = graph.get(pi['from'])
+            if parent:
+                parent_label = parent['row'][1]
+                rel = pi['rel_type']
+                path_segments.append(f"{parent_label} → [{rel}] → {node['row'][1]}")
+                current_id = pi['from']
+            else:
+                break
+        else:
+            break
+    else:
+        # Fallback: nur aktuelle Entity
+        path_segments.append(info['row'][1])
+
+    return " → ".join(reversed(path_segments))
+
+
+def _get_rationale_text(
+    entity_id: str,
+    graph: dict[str, dict],
+    conn: sqlite3.Connection,
+) -> str | None:
+    """
+    Hole Rationale-Text für eine Entity.
+
+    Priorität:
+    1. source_text der Relationship (direkter Beweis)
+    2. RATIONALE-Entity description (über ERKLÄRT_MIT/WEGEN/HINTET_AUF)
+    """
+    info = graph.get(entity_id)
+    if not info:
+        return None
+
+    # 1. source_text aus der Relationship
+    pi = info.get('path_info')
+    if pi and pi.get('source_text'):
+        return pi['source_text'][:200]
+
+    # 2. RATIONALE-Entity über incoming relationships
+    rat_rows = conn.execute("""
+        SELECT e.description, r.source_text
+        FROM relationships r
+        JOIN entities e ON r.source_id = e.id
+        WHERE r.target_id = ?
+          AND r.valid_until IS NULL
+          AND r.relation_type IN ('ERKLÄRT_MIT', 'WEGEN', 'HINTET_AUF')
+          AND e.entity_type = 'RATIONALE'
+        LIMIT 1
+    """, (entity_id,)).fetchall()
+
+    if rat_rows:
+        return (rat_rows[0][0] or rat_rows[0][1] or "")[:200]
+
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Graph Search (Phase A+B+C — Embedding + BFS + Scoring + Evidence)
+# ═══════════════════════════════════════════════════════════════════════
+
+
 def cmd_graph_search(
     query: str,
     as_json: bool = False,
@@ -4127,17 +4520,30 @@ def cmd_graph_search(
     with_rationale: bool = False,
     since: str | None = None,
     until: str | None = None,
+    max_hops: int = 1,
+    max_results: int | None = 200,
 ) -> None:
-    """Simple graph lookup: find entities matching query + their 1-hop relations.
+    """Graph lookup: find entities matching query + multi-hop BFS expansion.
+
+    Stages:
+      1. Embedding-based cosine similarity (top-k, threshold >= 0.5) → seed entities
+      2. LIKE fallback (safety-net when embedding fails or returns nothing)
+      3. Multi-hop BFS expansion from seeds (up to max_hops)
+      4. Path scoring with hop-decay + confidence weighting
+      5. Evidence assembly with path reconstruction + rationale
 
     Args:
         query: Text to match against entity labels and descriptions.
         as_json: If True, emit a JSON array to stdout instead of log-lines.
         scopes: Optional list of scope prefixes (e.g. ["private", "family"])
                 to filter entities by their wiki_page field.
-        with_rationale: If True, also show incoming ERKLÄRT_MIT/WEGEN/HINTET_AUF
-            relations from RATIONALE entities (Phase 2B Why-Nodes).
+        with_rationale: If True, also show rationale text for each entity.
+        since: Only include relations starting on or after this date.
+        until: Only include relations ending on or before this date.
+        max_hops: Maximum BFS hop distance (1-5, default 1 for backward compat).
     """
+    max_hops = max(1, min(5, max_hops))
+
     if not _graph_has_tables():
         if as_json:
             print(json.dumps([], ensure_ascii=False))
@@ -4146,19 +4552,94 @@ def cmd_graph_search(
         return
 
     conn = sqlite3.connect(DB_PATH)
-    like = f"%{query}%"
-    rows = conn.execute(
-        "SELECT id, label, entity_type, description, wiki_page FROM entities "
-        "WHERE label LIKE ? COLLATE NOCASE OR description LIKE ? COLLATE NOCASE",
-        (like, like),
-    ).fetchall()
 
-    # Scope filter: wiki_page is always "scope/slug"
+    # ── Stage 1: Embedding-based seed finding ──────────────────────
+    q_emb = _embed_entity_label(query)
+    embedding_seeds: list[tuple] = []
+    seed_similarities: dict[str, float] = {}  # entity_id -> cosine similarity
+
+    if q_emb is not None:
+        try:
+            q_vec = np.frombuffer(q_emb, dtype=np.float32).flatten()
+            q_norm = np.linalg.norm(q_vec)
+            if q_norm > 0:
+                q_vec = q_vec / q_norm
+
+                emb_rows = conn.execute(
+                    "SELECT id, label, entity_type, description, wiki_page, embedding "
+                    "FROM entities WHERE embedding IS NOT NULL AND valid_until IS NULL"
+                ).fetchall()
+
+                if emb_rows:
+                    # Entity-type-spezifische Seed-Thresholds (präziser bei Namen, breiter bei Konzepten)
+                    SEED_THRESHOLDS = {
+                        "PERSON": 0.80,
+                        "ORGANIZATION": 0.75,
+                        "DOCUMENT": 0.45,
+                        "CONCEPT": 0.50,
+                    }
+                    DEFAULT_SEED_THRESHOLD = 0.50
+                    scored: list[tuple[float, tuple]] = []
+                    for row in emb_rows:
+                        e_blob = row[5]
+                        if e_blob is None:
+                            continue
+                        try:
+                            e_vec = np.frombuffer(e_blob, dtype=np.float32).flatten()
+                            e_norm = np.linalg.norm(e_vec)
+                            if e_norm > 0:
+                                sim = float(np.dot(q_vec.flatten(), e_vec / e_norm))
+                                etype = row[2]  # entity_type
+                                threshold = SEED_THRESHOLDS.get(etype, DEFAULT_SEED_THRESHOLD)
+                                if sim >= threshold:
+                                    scored.append((sim, row[:5]))
+                        except Exception:
+                            continue
+
+                    scored.sort(key=lambda x: -x[0])
+                    embedding_seeds = [s[1] for s in scored[:10]]
+                    for sim, row in scored[:10]:
+                        seed_similarities[row[0]] = sim
+
+                    if embedding_seeds:
+                        log("graph-search", f"Embedding seeds: {len(embedding_seeds)} entities (top sim={scored[0][0]:.3f})", stderr=True)
+
+        except Exception as e:
+            log("warn", f"  [graph-search] embedding seed search failed: {e}", stderr=True)
+
+    # ── Stage 2: LIKE fallback (safety-net) ────────────────────────
+    like_rows: list[tuple] = []
+    if not embedding_seeds:
+        like = f"%{query}%"
+        like_rows = conn.execute(
+            "SELECT id, label, entity_type, description, wiki_page FROM entities "
+            "WHERE label LIKE ? COLLATE NOCASE OR description LIKE ? COLLATE NOCASE",
+            (like, like),
+        ).fetchall()
+        for lr in like_rows:
+            seed_similarities[lr[0]] = 0.5  # LIKE gets baseline similarity
+        log("graph-search", f"LIKE fallback: {len(like_rows)} entities for '{query}'", stderr=True)
+
+    # Combine: embedding seeds first, then LIKE results (deduplicated by id)
+    seen_ids: set[str] = set()
+    seed_rows: list[tuple] = []
+    for r in embedding_seeds:
+        if r[0] not in seen_ids:
+            seen_ids.add(r[0])
+            seed_rows.append(r)
+    for r in like_rows:
+        if r[0] not in seen_ids:
+            seen_ids.add(r[0])
+            seed_rows.append(r)
+
+    # Scope filter on seeds
     if scopes:
         scope_prefixes = tuple(f"{s}/" for s in scopes)
-        rows = [r for r in rows if r[4] and r[4].startswith(scope_prefixes)]
+        seed_rows = [r for r in seed_rows if r[4] and r[4].startswith(scope_prefixes)]
+        # Also filter seed_similarities
+        seed_similarities = {k: v for k, v in seed_similarities.items() if k in seen_ids}
 
-    if not rows:
+    if not seed_rows:
         conn.close()
         if as_json:
             print(json.dumps([], ensure_ascii=False))
@@ -4166,100 +4647,250 @@ def cmd_graph_search(
             log("info", f"No entities matching '{query}'")
         return
 
+    # ── Stage 3: Multi-hop BFS expansion ───────────────────────────
+    seed_ids = [r[0] for r in seed_rows]
+    graph = _bfs_expand(seed_ids, seed_similarities, conn, max_hops)
+
+    # Scope filter on expanded entities
+    if scopes:
+        scope_prefixes = tuple(f"{s}/" for s in scopes)
+        graph = {
+            k: v for k, v in graph.items()
+            if v['row'][4] and v['row'][4].startswith(scope_prefixes)
+        }
+
+    if not graph:
+        conn.close()
+        if as_json:
+            print(json.dumps([], ensure_ascii=False))
+        else:
+            log("info", f"No entities matching '{query}'")
+        return
+
+    # ── Stage 4: Sort by score (descending), group by hop ──────────
+    sorted_entities = sorted(graph.items(), key=lambda x: (-x[1]['score'], x[1]['hop']))
+
+    # ── Stage 5: Limit results (prevent BFS explosion) ──────────────
+    if max_results is not None and len(sorted_entities) > max_results:
+        sorted_entities = sorted_entities[:max_results]
+        log("graph-search", f"Results limited to {max_results} (truncated from {len(graph)})", stderr=True)
+
     if as_json:
-        result = _entities_to_json(conn, rows, with_rationale=with_rationale, since=since, until=until)
+        result = _graph_search_to_json(conn, sorted_entities, graph, with_rationale, since, until)
         conn.close()
         print(json.dumps(result, ensure_ascii=False))
     else:
-        log("info", f"Found {len(rows)} entity/entities matching '{query}':")
-
-        for eid, label, etype, desc, page in rows:
-            log("info", f"  \u25cf {label} [{etype}]")
-            if desc:
-                log("info", f"    {desc}")
-            if page:
-                log("info", f"    page: {page}")
-
-            # Community membership (graceful if tables don't exist yet)
-            try:
-                comm_rows = conn.execute(
-                    "SELECT c.id, c.label FROM communities c "
-                    "JOIN community_members cm ON c.id = cm.community_id "
-                    "WHERE cm.entity_id = ?",
-                    (eid,),
-                ).fetchall()
-            except sqlite3.OperationalError:
-                comm_rows = []
-            for cid, clabel in comm_rows:
-                log("info", f"    community: {clabel} ({cid[:8]}...)")
-
-            rels_out_where, rels_out_params = _temporal_filter(
-                "WHERE r.source_id = ? AND r.valid_until IS NULL", [eid], since, until
-            )
-            rels_out = conn.execute(
-                "SELECT r.relation_type, r.description, e.label, r.confidence, r.valid_from, r.valid_until "
-                "FROM relationships r JOIN entities e ON r.target_id = e.id "
-                + rels_out_where,
-                rels_out_params,
-            ).fetchall()
-
-            rels_in_where, rels_in_params = _temporal_filter(
-                "WHERE r.target_id = ? AND r.valid_until IS NULL", [eid], since, until
-            )
-            rels_in = conn.execute(
-                "SELECT r.relation_type, r.description, e.label, r.confidence, r.valid_from, r.valid_until "
-                "FROM relationships r JOIN entities e ON r.source_id = e.id "
-                + rels_in_where,
-                rels_in_params,
-            ).fetchall()
-
-            if rels_out:
-                log("info", f"    \u2192 outgoing ({len(rels_out)}):")
-                for rtype, rdesc, target_label, conf, vf, vu in rels_out[:10]:
-                    conf_display = conf or DEFAULT_CONFIDENCE
-                    temporal = _temporal_tag(vf, vu)
-                    log("info", f"      \u2514\u2500 {rtype} \u2192 {target_label} [confidence={conf_display}]{temporal}")
-                    if rdesc:
-                        log("info", f"         {rdesc}")
-
-            if rels_in:
-                log("info", f"    \u2190 incoming ({len(rels_in)}):")
-                for rtype, rdesc, source_label, conf, vf, vu in rels_in[:10]:
-                    conf_display = conf or DEFAULT_CONFIDENCE
-                    temporal = _temporal_tag(vf, vu)
-                    log("info", f"      \u2514\u2500 {source_label} {rtype} [confidence={conf_display}]{temporal}")
-                    if rdesc:
-                        log("info", f"         {rdesc}")
-
-            # Phase 2B: show rationale nodes
-            if with_rationale:
-                rat_where, rat_params = _temporal_filter(
-                    "WHERE r.target_id = ? AND r.valid_until IS NULL AND r.relation_type IN ('ERKLÄRT_MIT', 'WEGEN', 'HINTET_AUF') AND e.entity_type = 'RATIONALE'",
-                    [eid], since, until
-                )
-                rationale_rows = conn.execute(
-                    "SELECT r.relation_type, r.description, e.label, r.confidence, r.valid_from, r.valid_until "
-                    "FROM relationships r JOIN entities e ON r.source_id = e.id "
-                    + rat_where,
-                    rat_params,
-                ).fetchall()
-                if rationale_rows:
-                    log("info", f"    \u2753 rationale ({len(rationale_rows)}):")
-                    for rtype, rdesc, source_label, conf, vf, vu in rationale_rows[:5]:
-                        conf_display = conf or DEFAULT_CONFIDENCE
-                        temporal = _temporal_tag(vf, vu)
-                        log("info", f"      \u2514\u2500 {source_label} {rtype} [confidence={conf_display}]{temporal}")
-                        if rdesc:
-                            log("info", f"         {rdesc}")
-
-            log("info", "")
-
+        _graph_search_display(conn, sorted_entities, graph, query, with_rationale, since, until)
         conn.close()
+
+
+def _graph_search_to_json(
+    conn: sqlite3.Connection,
+    sorted_entities: list[tuple[str, dict]],
+    graph: dict[str, dict],
+    with_rationale: bool,
+    since: str | None,
+    until: str | None,
+) -> list[dict]:
+    """Build JSON output for graph search results with BFS + scoring."""
+    result = []
+    for eid, info in sorted_entities:
+        eid_row = info['row']  # (id, label, entity_type, description, wiki_page)
+        label, etype, desc, page = eid_row[1], eid_row[2], eid_row[3], eid_row[4]
+
+        # 1-hop relations (for context)
+        rels_out_where, rels_out_params = _temporal_filter(
+            "WHERE r.source_id = ? AND r.valid_until IS NULL", [eid], since, until
+        )
+        rels_out = conn.execute(
+            "SELECT r.relation_type, r.description, e.label, r.confidence, r.valid_from, r.valid_until "
+            "FROM relationships r JOIN entities e ON r.target_id = e.id "
+            + rels_out_where,
+            rels_out_params,
+        ).fetchall()
+
+        rels_in_where, rels_in_params = _temporal_filter(
+            "WHERE r.target_id = ? AND r.valid_until IS NULL", [eid], since, until
+        )
+        rels_in = conn.execute(
+            "SELECT r.relation_type, r.description, e.label, r.confidence, r.valid_from, r.valid_until "
+            "FROM relationships r JOIN entities e ON r.source_id = e.id "
+            + rels_in_where,
+            rels_in_params,
+        ).fetchall()
+
+        entry: dict[str, object] = {
+            "label": label,
+            "type": etype,
+            "description": desc or "",
+            "wiki_page": page or "",
+            "hop": info['hop'],
+            "score": info['score'],
+            "path": _reconstruct_path(eid, graph, conn, ""),
+            "outgoing": [
+                {"relation_type": rt, "target": tl, "description": rd or "",
+                 "confidence": conf or DEFAULT_CONFIDENCE, "valid_from": vf, "valid_until": vu}
+                for rt, rd, tl, conf, vf, vu in rels_out[:10]
+            ],
+            "incoming": [
+                {"relation_type": rt, "source": sl, "description": rd or "",
+                 "confidence": conf or DEFAULT_CONFIDENCE, "valid_from": vf, "valid_until": vu}
+                for rt, rd, sl, conf, vf, vu in rels_in[:10]
+            ],
+        }
+
+        # Rationale
+        if with_rationale:
+            rat = _get_rationale_text(eid, graph, conn)
+            if rat:
+                entry["rationale"] = rat
+
+        # Community membership
+        try:
+            comm_rows = conn.execute(
+                "SELECT c.id, c.label FROM communities c "
+                "JOIN community_members cm ON c.id = cm.community_id "
+                "WHERE cm.entity_id = ?",
+                (eid,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            comm_rows = []
+        if comm_rows:
+            entry["communities"] = [
+                {"community_id": cid, "community_label": clabel}
+                for cid, clabel in comm_rows
+            ]
+
+        result.append(entry)
+    return result
+
+
+def _graph_search_display(
+    conn: sqlite3.Connection,
+    sorted_entities: list[tuple[str, dict]],
+    graph: dict[str, dict],
+    query: str,
+    with_rationale: bool,
+    since: str | None,
+    until: str | None,
+) -> None:
+    """Display graph search results with BFS + scoring + evidence."""
+    total = len(sorted_entities)
+    max_hop = max(info['hop'] for _, info in sorted_entities)
+
+    log("info", f"Found {total} entity/entities matching '{query}' (max {max_hop} hops):")
+
+    current_hop: int | None = None
+    for eid, info in sorted_entities:
+        eid_row = info['row']
+        label, etype, desc, page = eid_row[1], eid_row[2], eid_row[3], eid_row[4]
+        hop = info['hop']
+        score = info['score']
+
+        # Hop-group header
+        if hop != current_hop:
+            current_hop = hop
+            hop_label = "SEEDS" if hop == 0 else f"HOP {hop}"
+            log("info", f"")
+            log("info", f"═══ {hop_label} ═══")
+
+        # Entity header with score
+        log("info", f"  ● {label} [{etype}] (hop {hop}, score: {score})")
+
+        # Path
+        path = _reconstruct_path(eid, graph, conn, query)
+        if path:
+            log("info", f"    Pfad: {path}")
+
+        # Description
+        if desc:
+            log("info", f"    {desc}")
+        if page:
+            log("info", f"    page: {page}")
+
+        # Rationale
+        if with_rationale:
+            rat = _get_rationale_text(eid, graph, conn)
+            if rat:
+                log("info", f"    Rationale: \"{rat}\"")
+
+        # Community membership
+        try:
+            comm_rows = conn.execute(
+                "SELECT c.id, c.label FROM communities c "
+                "JOIN community_members cm ON c.id = cm.community_id "
+                "WHERE cm.entity_id = ?",
+                (eid,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            comm_rows = []
+        for cid, clabel in comm_rows:
+            log("info", f"    community: {clabel} ({cid[:8]}...)")
+
+        # 1-hop relations for context
+        rels_out_where, rels_out_params = _temporal_filter(
+            "WHERE r.source_id = ? AND r.valid_until IS NULL", [eid], since, until
+        )
+        rels_out = conn.execute(
+            "SELECT r.relation_type, r.description, e.label, r.confidence, r.valid_from, r.valid_until "
+            "FROM relationships r JOIN entities e ON r.target_id = e.id "
+            + rels_out_where,
+            rels_out_params,
+        ).fetchall()
+
+        rels_in_where, rels_in_params = _temporal_filter(
+            "WHERE r.target_id = ? AND r.valid_until IS NULL", [eid], since, until
+        )
+        rels_in = conn.execute(
+            "SELECT r.relation_type, r.description, e.label, r.confidence, r.valid_from, r.valid_until "
+            "FROM relationships r JOIN entities e ON r.source_id = e.id "
+            + rels_in_where,
+            rels_in_params,
+        ).fetchall()
+
+        if rels_out:
+            log("info", f"    → outgoing ({len(rels_out)}):")
+            for rtype, rdesc, target_label, conf, vf, vu in rels_out[:10]:
+                conf_display = conf or DEFAULT_CONFIDENCE
+                temporal = _temporal_tag(vf, vu)
+                log("info", f"      └─ {rtype} → {target_label} [confidence={conf_display}]{temporal}")
+                if rdesc:
+                    log("info", f"         {rdesc}")
+
+        if rels_in:
+            log("info", f"    ← incoming ({len(rels_in)}):")
+            for rtype, rdesc, source_label, conf, vf, vu in rels_in[:10]:
+                conf_display = conf or DEFAULT_CONFIDENCE
+                temporal = _temporal_tag(vf, vu)
+                log("info", f"      └─ {source_label} {rtype} [confidence={conf_display}]{temporal}")
+                if rdesc:
+                    log("info", f"         {rdesc}")
+
+        log("info", "")
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  HTML Graph Export (Phase 2C — data layer only)
 # ═══════════════════════════════════════════════════════════════════════
+
+
+def _load_community_mapping(db: sqlite3.Connection) -> Dict[str, Tuple[str, str]]:
+    """Load entity_id -> (community_id, community_label) mapping.
+
+    Returns a dict mapping each entity_id to its (community_id, community_label).
+    Only leaf-level (level=0) communities are used for the most specific grouping.
+    Empty dict if communities table doesn't exist.
+    """
+    try:
+        rows = db.execute(
+            "SELECT cm.entity_id, c.id, c.label "
+            "FROM community_members cm "
+            "JOIN communities c ON cm.community_id = c.id "
+            "WHERE c.level = 0"
+        ).fetchall()
+        return {row[0]: (row[1], row[2] or '') for row in rows}
+    except Exception:
+        return {}
 
 
 def _build_graph_data(
@@ -4295,44 +4926,56 @@ def _build_graph_data(
     if not seed_ids:
         return [], []
 
-    seed_ids_str = ", ".join(f"'{sid}'" for sid in seed_ids)
+    seed_ph = ", ".join("?" * len(seed_ids))
+    seed_ids_tuple = tuple(seed_ids)
 
     # ── Step 2: 1-hop neighbours (both directions) ──────────────────
     neighbour_rows = db.execute(
-        f"SELECT e.id, e.label, e.entity_type, COALESCE(e.description, '') "
+        "SELECT e.id, e.label, e.entity_type, COALESCE(e.description, '') "
         "FROM entities e "
         "INNER JOIN relationships r ON (r.source_id = e.id OR r.target_id = e.id) "
-        f"WHERE (r.source_id IN ({seed_ids_str}) OR r.target_id IN ({seed_ids_str})) "
+        f"WHERE (r.source_id IN ({seed_ph}) OR r.target_id IN ({seed_ph})) "
         "AND e.valid_until IS NULL AND r.valid_until IS NULL "
         "UNION "
         f"SELECT id, label, entity_type, COALESCE(description, '') FROM entities "
-        f"WHERE id IN ({seed_ids_str})"
+        f"WHERE id IN ({seed_ph})",
+        seed_ids_tuple + seed_ids_tuple + seed_ids_tuple,
     ).fetchall()
 
     all_ids = {row[0] for row in neighbour_rows}
-    all_ids_str = ", ".join(f"'{eid}'" for eid in all_ids)
+    all_ph = ", ".join("?" * len(all_ids))
+    all_ids_tuple = tuple(all_ids)
 
     # ── Step 3: Relationships among discovered entities ──────────────
-    rel_where = f"source_id IN ({all_ids_str}) AND target_id IN ({all_ids_str}) AND valid_until IS NULL"
+    rel_where = f"source_id IN ({all_ph}) AND target_id IN ({all_ph}) AND valid_until IS NULL"
+    rel_params = all_ids_tuple + all_ids_tuple
     if min_confidence and min_confidence in CONFIDENCE_ORDER:
         min_val = CONFIDENCE_ORDER[min_confidence]
         rel_where += (
-            f" AND CASE confidence WHEN 'extracted' THEN 3 WHEN 'inferred' THEN 2 ELSE 1 END >= {min_val}"
+            " AND CASE confidence WHEN 'extracted' THEN 3 WHEN 'inferred' THEN 2 ELSE 1 END >= ?"
         )
+        rel_params = rel_params + (min_val,)
 
     rel_rows = db.execute(
         f"SELECT source_id, target_id, relation_type, COALESCE(confidence, '{DEFAULT_CONFIDENCE}') "
-        f"FROM relationships WHERE {rel_where}"
+        f"FROM relationships WHERE {rel_where}",
+        rel_params,
     ).fetchall()
+
+    # ── Community mapping ─────────────────────────────────────────
+    community_map = _load_community_mapping(db)
 
     # ── Build result structures ──────────────────────────────────────
     entities = []
     for eid, label, etype, desc in neighbour_rows:
+        comm_id, comm_label = community_map.get(eid, (None, None))
         entities.append({
             "id": eid,
             "label": label,
             "type": etype,
             "description": desc[:500],
+            "community_id": comm_id,
+            "community_label": comm_label,
         })
 
     relationships = []
@@ -4396,15 +5039,21 @@ def _build_full_graph_data(
         link_counts[src] = link_counts.get(src, 0) + 1
         link_counts[tgt] = link_counts.get(tgt, 0) + 1
 
+    # Community mapping
+    community_map = _load_community_mapping(db)
+
     # Build entity list with linkCount
     entities = []
     for eid, label, etype, desc in entity_rows:
+        comm_id, comm_label = community_map.get(eid, (None, None))
         entities.append({
             "id": eid,
             "label": label,
             "type": etype,
             "description": desc[:500],
             "linkCount": link_counts.get(eid, 0),
+            "community_id": comm_id,
+            "community_label": comm_label,
         })
 
     return entities, relationships
@@ -4415,6 +5064,7 @@ def _generate_html_graph(
     query: str,
     nodes_json: str,
     links_json: str,
+    community_members_json: str = "{}",
     has_private: bool = False,
     skip_limits: bool = False,
 ) -> str:
@@ -4450,10 +5100,11 @@ def _generate_html_graph(
                 "Use a more specific query."
             )
 
-    # Filename: graph_<md5(query)[:8]>.html
+    # Filename: graph_<md5(query)[:8]>_<timestamp>.html (timestamp prevents browser caching)
     query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:8]
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M")
     _GRAPH_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = _GRAPH_OUTPUT_DIR / f"graph_{query_hash}.html"
+    output_path = _GRAPH_OUTPUT_DIR / f"graph_{query_hash}_{timestamp}.html"
 
     # Load template from file
     if not _HTML_TEMPLATE_PATH.exists():
@@ -4464,6 +5115,7 @@ def _generate_html_graph(
     data_json = json.dumps({
         "nodes": json.loads(nodes_json),
         "links": json.loads(links_json),
+        "community_members": json.loads(community_members_json),
     }, ensure_ascii=False)
 
     # Replace template variables
@@ -4504,6 +5156,25 @@ def cmd_graph_html(query: str, min_confidence: str | None = None, all_graph: boo
                 log("error", " Query required for subgraph. Use --all for the full graph.", stderr=True)
                 sys.exit(1)
             entities, relationships = _build_graph_data(conn, query, min_confidence)
+
+        # Load community members for sidebar display
+        community_members: Dict[str, List[Dict[str, str]]] = {}
+        try:
+            cm_rows = conn.execute(
+                "SELECT cm.community_id, cm.entity_id, e.label, e.entity_type "
+                "FROM community_members cm "
+                "JOIN entities e ON cm.entity_id = e.id "
+                "WHERE e.valid_until IS NULL "
+                "ORDER BY cm.community_id, e.label"
+            ).fetchall()
+            for cid, eid, elabel, etype in cm_rows:
+                community_members.setdefault(cid, []).append({
+                    "id": eid,
+                    "label": elabel,
+                    "type": etype,
+                })
+        except Exception:
+            pass
     finally:
         conn.close()
 
@@ -4516,6 +5187,7 @@ def cmd_graph_html(query: str, min_confidence: str | None = None, all_graph: boo
 
     nodes_json = json.dumps(entities, ensure_ascii=False)
     links_json = json.dumps(relationships, ensure_ascii=False)
+    community_members_json = json.dumps(community_members, ensure_ascii=False)
 
     # Check for private-scope entities
     has_private = any(
@@ -4527,6 +5199,7 @@ def cmd_graph_html(query: str, min_confidence: str | None = None, all_graph: boo
         query=query or "Full Graph",
         nodes_json=nodes_json,
         links_json=links_json,
+        community_members_json=community_members_json,
         has_private=has_private,
         skip_limits=all_graph,
     )
@@ -4921,7 +5594,7 @@ def _clean_expired_rules(store, rule_store_path):
 
 
 def _hitl_notify(rule):
-    """Discord-Nachricht an Owner im #system-Kanal (0000000000000000000)."""
+    """Discord-Nachricht an den Betreiber im #system-Kanal (0000000000000000000)."""
     now = datetime.datetime.utcnow()
     expires = datetime.datetime.fromisoformat(rule["expires"])
     days_remaining = (expires - now).days
@@ -5025,6 +5698,9 @@ def main() -> int:
     # graph cleanup
     graph_sub.add_parser("cleanup", help="Clean up orphaned relationships (missing source/target)")
 
+    # graph embed-missing (backfill entity embeddings)
+    graph_sub.add_parser("embed-missing", help="Compute embeddings for entities that still have NULL embedding")
+
     # graph search
     sp_gs = graph_sub.add_parser("search", help="Search the knowledge graph")
     sp_gs.add_argument("query")
@@ -5037,6 +5713,10 @@ def main() -> int:
         help="Only show relations starting on or after YYYY-MM-DD (NULL dates always pass)")
     sp_gs.add_argument("--until", type=str, default=None,
         help="Only show relations ending on or before YYYY-MM-DD (NULL dates always pass)")
+    sp_gs.add_argument("--max-hops", type=int, default=1, choices=[1, 2, 3, 4, 5],
+        help="Maximum BFS hop distance from seed entities (default: 1)")
+    sp_gs.add_argument("--max-results", type=int, default=200,
+        help="Maximum number of results to return (default: 200, 0=unlimited)")
 
     # graph pages (vector→graph bridge: entities anchored on given wiki pages)
     sp_gp = graph_sub.add_parser("pages", help="Entities (+1-hop) for given wiki pages")
@@ -5215,13 +5895,17 @@ def main() -> int:
             conn.commit()
             conn.close()
             log("info", f"Cleaned up {cleaned} orphaned relationships")
+        elif gc == "embed-missing":
+            cmd_graph_embed_missing()
         elif gc == "search":
             scopes = None
             if getattr(args, "scopes", None):
                 scopes = [s.strip() for s in args.scopes.split(",")]
             with_rat = getattr(args, "with_rationale", False)
             cmd_graph_search(args.query, as_json=getattr(args, "json", False), scopes=scopes, with_rationale=with_rat,
-                             since=getattr(args, "since", None), until=getattr(args, "until", None))
+                             since=getattr(args, "since", None), until=getattr(args, "until", None),
+                             max_hops=getattr(args, "max_hops", 1),
+                             max_results=getattr(args, "max_results", 200) or None)
         elif gc == "pages":
             scopes = None
             if getattr(args, "scopes", None):
@@ -5349,6 +6033,58 @@ def _sha256(text: str) -> str:
 
 # ── 1. Prompt Update ─────────────────────────────────────────────────────────
 
+def _validate_rule_direction(direction: str, rule_id: str) -> str:
+    """Validate and sanitize rule direction to prevent prompt injection.
+
+    Rules:
+    - Max 500 characters
+    - No markdown headers (#)
+    - No code blocks (```
+    - No control characters
+    - No prompt injection patterns (ignore previous, new instructions, etc.)
+
+    Returns sanitized string, raises ValueError if invalid.
+    """
+    import re
+
+    if not isinstance(direction, str):
+        raise ValueError(f"Rule {rule_id}: direction must be a string")
+
+    if len(direction) > 500:
+        raise ValueError(f"Rule {rule_id}: direction too long ({len(direction)} > 500)")
+
+    # Remove control characters
+    direction = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', direction)
+
+    if not direction.strip():
+        raise ValueError(f"Rule {rule_id}: direction is empty after sanitization")
+
+    # Check for prompt injection patterns
+    injection_patterns = [
+        r'ignore\s+(all\s+)?previous',
+        r'ignore\s+(all\s+)?prior',
+        r'new\s+instructions',
+        r'you\s+are\s+now',
+        r'disregard\s+(all\s+)?',
+        r'system\s*:',
+        r'\[system\]',
+        r'<\s*/?\s*(system|instruction|prompt)',
+    ]
+    for pattern in injection_patterns:
+        if re.search(pattern, direction, re.IGNORECASE):
+            raise ValueError(f"Rule {rule_id}: direction contains suspicious pattern: {pattern}")
+
+    # No markdown headers
+    if re.search(r'^\s*#', direction, re.MULTILINE):
+        raise ValueError(f"Rule {rule_id}: direction contains markdown header")
+
+    # No code blocks
+    if '```' in direction:
+        raise ValueError(f"Rule {rule_id}: direction contains code block")
+
+    return direction.strip()
+
+
 def _apply_rule_to_prompt(rule_store_path: str, prompt_path: str) -> dict:
     """Insert activated rules as an [AUTO] section into the extraction prompt.
 
@@ -5364,12 +6100,26 @@ def _apply_rule_to_prompt(rule_store_path: str, prompt_path: str) -> dict:
 
     # Build [AUTO] section
     auto_section = "\n### [AUTO] Extraction Rules (automatisch generiert)\n\n"
+    rejected_rules = []
     for rule in activated:
         title = rule.get("title", rule["rule_id"]).upper()
-        auto_section += f"**{title}:** {rule['direction']}\n"
-        if rule.get("rule_text"):
-            auto_section += f"> {rule['rule_text']}\n"
-        auto_section += "\n"
+        try:
+            direction = _validate_rule_direction(rule['direction'], rule['rule_id'])
+            auto_section += f"**{title}:** {direction}\n"
+            if rule.get("rule_text"):
+                auto_section += f"> {rule['rule_text']}\n"
+            auto_section += "\n"
+        except ValueError as e:
+            rejected_rules.append(str(e))
+            log("warn", f"  Rule rejected: {e}", stderr=True)
+
+    if rejected_rules:
+        return {
+            "applied": 0,
+            "prompt_path": prompt_path,
+            "rejected": rejected_rules,
+            "error": "Rules rejected due to validation errors"
+        }
 
     # Read existing prompt
     prompt_text = ""
@@ -5691,7 +6441,7 @@ def _check_degradation(
             rule["deprecation_reason"] = (
                 rule.get("quarantine_reason", "") + " → confirmed on second check"
             )
-            rule["updated"] = datetime.utcnow().isoformat()
+            rule["updated"] = datetime.datetime.utcnow().isoformat()
             _save_rule_store(rule_store_path, store)
 
             # Notify with HIGH priority (confirmed degradation)
@@ -5702,7 +6452,7 @@ def _check_degradation(
                 "priority": "high",
                 "severity": "high",
                 "evidence_count": current_fc,
-                "expires": (datetime.utcnow() + timedelta(days=7)).isoformat(),
+                "expires": (datetime.datetime.utcnow() + timedelta(days=7)).isoformat(),
             })
 
         else:
@@ -5711,7 +6461,7 @@ def _check_degradation(
             rule["quarantine_reason"] = (
                 f"failure_count {baseline_fc}->{current_fc}, orphan_rate {baseline_or:.3f}->{current_or:.3f}"
             )
-            rule["updated"] = datetime.utcnow().isoformat()
+            rule["updated"] = datetime.datetime.utcnow().isoformat()
             _save_rule_store(rule_store_path, store)
 
             # Notify with MEDIUM priority (needs confirmation on next check)
@@ -5722,7 +6472,7 @@ def _check_degradation(
                 "priority": "medium",
                 "severity": "medium",
                 "evidence_count": current_fc,
-                "expires": (datetime.utcnow() + timedelta(days=7)).isoformat(),
+                "expires": (datetime.datetime.utcnow() + timedelta(days=7)).isoformat(),
             })
 
     return {
@@ -5748,14 +6498,14 @@ def _check_spiral_protection(rule_store_path: str) -> bool:
     Returns ``True`` when evolution was paused this call, ``False`` otherwise.
     """
     store = _load_rule_store(rule_store_path)
-    one_month_ago = datetime.utcnow() - timedelta(days=30)
+    one_month_ago = datetime.datetime.utcnow() - timedelta(days=30)
 
     degraded_last_month = sum(
         1
         for r in store["rules"]
         if r["status"] == "deprecated"
         and r.get("updated")
-        and datetime.fromisoformat(r["updated"]) > one_month_ago
+        and datetime.datetime.fromisoformat(r["updated"]) > one_month_ago
     )
 
     if degraded_last_month >= 3 and not store.get("metadata", {}).get("evolution_paused"):
@@ -5765,7 +6515,7 @@ def _check_spiral_protection(rule_store_path: str) -> bool:
         )
         _save_rule_store(rule_store_path, store)
 
-        # Alert Owner
+        # Alert operator
         _hitl_notify({
             "title": "EVOLUTION PAUSED",
             "direction": (
@@ -5776,7 +6526,7 @@ def _check_spiral_protection(rule_store_path: str) -> bool:
             "priority": "critical",
             "severity": "critical",
             "evidence_count": degraded_last_month,
-            "expires": (datetime.utcnow() + timedelta(days=7)).isoformat(),
+            "expires": (datetime.datetime.utcnow() + timedelta(days=7)).isoformat(),
         })
         return True
 
