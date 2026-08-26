@@ -48,6 +48,7 @@ activewiki/
 │   ├── config.py             ← config loader
 │   ├── ingest.py             ← import documents into inbox
 │   ├── distill.py            ← generate wiki pages (LLM)
+│   ├── check.py              ← nightly quality check (fact verification vs. sources + auto-patch)
 │   ├── split_pages.py        ← chunk large documents
 │   ├── vectordb.py           ← vector database + knowledge graph
 │   ├── graph_build.py        ← entity extraction + graph building
@@ -120,8 +121,15 @@ activewiki/
 - Hierarchical: folder structure becomes wiki hierarchy
 - Bottom-up rollup: parent pages synthesized from child pages
 
+**`check.py` — Nightly Quality Check:**
+- Verifies the oldest wiki pages against their full-text sources (deterministic table diff + LLM prose check in one call)
+- Inline auto-patch for fixes exactly evidenced by sources (exact-once-occurrence rule), self-contradiction filter, OCR-decimal normalization
+- Frontmatter tracking (`check_status` / `last_check` / `last_check_model`) + 2-commit pattern (check + patch)
+- JSON reports under `<wikis_root>/quality/results/`; 86 unit tests in `test_check.py`
+
 **`run_inbox.sh` — Master Pipeline:**
-- Coordinates all phases: Ingest → Distill → Vectordb → Graph
+- Coordinates all phases: Ingest → Distill → Auto-commit → Quality Check → Vectordb → Graph
+- QC phase runs after distill (patches get indexed in the same run) and only when the inbox is empty, before 02:30
 - Deadline-respecting (configurable)
 - Lock file (no parallel runs)
 

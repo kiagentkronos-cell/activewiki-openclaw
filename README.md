@@ -97,6 +97,23 @@ See [`plugin/README.md`](plugin/README.md) for the full Prompt Evolution Pipelin
 - **Entity resolution** — hybrid matching (embeddings + string similarity + Union-Find deduplication) with label-based cross-page lookup for robust entity identity
 - **Large section handling** — sections exceeding 15K chars are automatically split by `###` headings or paragraphs to stay within context limits
 
+### Quality Check (Nightly Fact-Verification)
+- **What it does** — `scripts/check.py` verifies the oldest wiki page against its full-text sources and **auto-repairs what is unambiguously evidenced** (inline patch in the same LLM call). Runs as a QC phase in the nightly pipeline: after distill, before vectordb — so patched pages are re-indexed in the same night run.
+- **Candidate selection** — `--oldest N` picks the N leaf pages with the oldest `updated` date (rollup rule: pages with children are skipped until their children have been checked). Pages with `check_status: clean|patched` and `last_check` ≤ 30 days are excluded.
+- **Two-layer verification** — one LLM call (page body + source excerpts) for prose facts, plus a deterministic table diff: every number in a wiki markdown table must appear in at least one source (number-normalization: comma↔dot decimals, thousands separators, years/URLs ignored; OCR-decimal normalization `199 34` ↔ `199,34`). OCR variants are only ever *match hints* — they never directly trigger a patch.
+- **Self-contradiction filter** — LLM issues whose own evidence/fix_hint retracts the finding ("no error", "is correct", …) are discarded and only listed in the report's `filtered_self_contradictions` field; they don't count as issues.
+- **Inline auto-patch** — per issue the LLM additionally returns `fix: {original, corrected}` (only when exactly supported by the loaded source evidence, else `null`). The code evaluates this deterministically and applies valid fixes via an exact-once-occurrence rule (`original` must appear exactly once in the page body — no paraphrases, no fuzzy matching). Deterministic table-diff issues are never patched.
+- **Frontmatter tracking** — `check_status` (`clean|issues|patched|error|uncheckable`), `last_check`, `last_check_model` are maintained per page; clean/patched pages are not re-checked for 30 days.
+- **2-commit pattern** — a successful body patch produces two git commits: `quality-check: <slug> check` (frontmatter `issues`, body unpatched) followed by `quality-check: <slug> patch` (body patched, `check_status: patched`). Without a valid patch, a single `check` commit is written. Commits are skipped on a dirty repo (safety guard).
+- **Reports** — one JSON report per page under `quality/results/` with `issues`, `filtered_self_contradictions`, and `patch: {patched, applied, skipped[claim+reason]}`.
+
+CLI:
+```bash
+scripts/check.py --oldest 2                    # 2 oldest leaf pages (what the nightly pipeline runs)
+scripts/check.py --page wiki/<scope>/<slug>.md # single page (check + auto-patch)
+scripts/check.py --all --since-days 7 --limit 20  # read-only (check only, no patches)
+```
+
 ### Temporal Filtering
 - **Time-bound relationship queries** — `--since YYYY-MM-DD` and `--until YYYY-MM-DD` filter relationships by validity period
 - **NULL-safe semantics** — timeless relationships (no date) always pass filters
@@ -106,6 +123,16 @@ See [`plugin/README.md`](plugin/README.md) for the full Prompt Evolution Pipelin
 - OpenClaw plugin automatically injects wiki hits into every LLM response
 - Scope-gated results (private/family/public) based on user authorization
 - Hybrid search: vector hits bridge to graph entities for combined context
+
+## Pipeline
+
+`run_inbox.sh` is the master pipeline for the nightly run. Each phase is deadline-aware (default 03:00) and logged to `logs/ingest-<date>.log`:
+
+1. **Ingest** (`ingest.py`) — OCR new inbox documents into `sources/` (Docling; PDF, images, DOCX)
+2. **Distill** (`distill.py`) — generate/update hierarchical wiki pages from sources + bottom-up rollup of the folder hierarchy
+3. **Auto-commit** — uncommitted build changes are committed so the repo is clean for QC commits
+4. **Quality Check** (`check.py --oldest 2`) — nightly fact-verification of the 2 oldest leaf pages vs. their sources (see Quality Check above). Only runs when the inbox is empty and before 02:30, i.e. *after* distill and *before* vectordb — patches are indexed in the same night run
+5. **Vectordb** (`vectordb.py build --graph-incremental --communities --communities-incremental`) — always runs (content-hash-based incremental), even past the deadline
 
 ## Full Documentation
 

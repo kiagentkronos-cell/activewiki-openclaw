@@ -1,21 +1,22 @@
 {
-  "_comment": "Maps sessionKey substrings to allowed scope lists. First matching entry wins. Edit here (no code change needed) to add/remove family members or change access patterns. 'scopes' values must be subset of ['private','family','public']. When extending to new channels (signal, email, etc.), use same substring style: ':<channel>:direct:<id>'. YouTube-Scope entfernt am 2026-05-23.",
+  "_comment": "Maps sessionKey substrings to allowed scope lists. First matching entry wins. Edit here (no code change needed) to add/remove family members or change access patterns. 'scopes' values must be subset of ['private','family','public']. When extending to new channels (signal, email, etc.), use same substring style: ':<channel>:direct:<id>'.",
+  "_security_warning": "CRITICAL: Never use broad channel-only patterns like ':discord:' or ':whatsapp:' for private/family scopes — they match EVERY session on that channel (including strangers in group chats). Always use exact identity patterns: ':discord:user:<USER_ID>' or ':discord:channel:<CHANNEL_ID>' for Discord, ':whatsapp:direct:<PHONE_NUMBER>' for WhatsApp. See OpenClaw session key documentation.",
   "entries": [
     {
       "name": "owner",
       "scopes": ["private", "family", "public"],
       "sessionKeyPatterns": [
-        ":discord:",
-        ":whatsapp:direct:+491XXXXXXXXXX"
+        ":discord:user:123456789012345678",
+        ":whatsapp:direct:+49XXXXXXXXXXXXXXXX"
       ]
     },
     {
       "name": "family",
       "scopes": ["private", "family", "public"],
       "sessionKeyPatterns": [
-        ":whatsapp:direct:+492XXXXXXXXXX",
-        ":whatsapp:direct:+493XXXXXXXXXX",
-        ":whatsapp:direct:+494XXXXXXXXXX"
+        ":whatsapp:direct:+49XXXXXXXXXXXXXXXX",
+        ":whatsapp:direct:+49XXXXXXXXXXXXXXXX",
+        ":whatsapp:direct:+49XXXXXXXXXXXXXXXX"
       ]
     }
   ],

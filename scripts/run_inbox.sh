@@ -130,6 +130,30 @@ else
     fi
 fi
 
+# Auto-Commit ausstehender Build-Änderungen (hält das Repo sauber für QC-Commits)
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "[$(stamp)] auto-commit: uncommitted build changes" >>"$LOG"
+        if git add -A >>"$LOG" 2>&1 && git commit -m "build: auto-commit uncommitted build changes" >>"$LOG" 2>&1; then
+            echo "[$(stamp)] auto-commit done" >>"$LOG"
+        else
+            echo "[$(stamp)] auto-commit FAILED (exit $?)" >>"$LOG"
+        fi
+    fi
+fi
+
+# QC-Phase (Wiki-Qualitäts-Check): nur wenn Inbox leer + Zeitfenster
+QC_DEADLINE=02:30
+if [ "$(find inbox/private inbox/family inbox/public -type f 2>/dev/null | wc -l)" -ne 0 ]; then
+    echo "[$(stamp)] quality-check skipped: inbox not empty" >>"$LOG"
+elif [ "$(date +%H:%M)" \> "$QC_DEADLINE" ]; then
+    echo "[$(stamp)] quality-check skipped: time window" >>"$LOG"
+else
+    echo "[$(stamp)] quality-check start (oldest 2)" >>"$LOG"
+    "$PYTHON" scripts/check.py --oldest 2 >>"$LOG" 2>&1
+    echo "[$(stamp)] quality-check end (exit $?)" >>"$LOG"
+fi
+
 # vectordb is now incremental (content-hash based) — always run it,
 # even past deadline.
 if past_deadline; then
