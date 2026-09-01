@@ -144,7 +144,13 @@ fi
 
 # QC-Phase (Wiki-Qualitäts-Check): nur wenn Inbox leer + Zeitfenster
 QC_DEADLINE=02:30
-if [ "$(find inbox/private inbox/family inbox/public -type f 2>/dev/null | wc -l)" -ne 0 ]; then
+# QC-Gate: Scopes aus der Config (wie Ingest-Phase); Fallback auf Default-Scopes
+# bei leerem SCOPES_ARR (Config-Lesefehler), damit das Gate nicht still "leer" meldet.
+QC_SCOPES=("${SCOPES_ARR[@]}")
+if [ ${#QC_SCOPES[@]} -eq 0 ]; then
+    QC_SCOPES=(private family public)
+fi
+if [ "$(find inbox/"${QC_SCOPES[@]}" -type f 2>/dev/null | wc -l)" -ne 0 ]; then
     echo "[$(stamp)] quality-check skipped: inbox not empty" >>"$LOG"
 elif [ "$(date +%H:%M)" \> "$QC_DEADLINE" ]; then
     echo "[$(stamp)] quality-check skipped: time window" >>"$LOG"
