@@ -23,7 +23,7 @@ import check  # noqa: E402  (Module unter Test)
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
-# Aus realer Page kopiert (Preisliste, gekürzt auf relevante Keys)
+# Aus anonymisierter Page kopiert (Preisliste, gekürzt auf relevante Keys)
 FRONTMATTER_REAL = """---
 title: 'Preisliste: Neubauprojekt ''Musterprojekt'' in Musterort'
 summary: Übersicht der Preisliste für das Neubauprojekt 'Musterprojekt' von Musterfirma Wohnbau in Musterort. Enthält Daten
