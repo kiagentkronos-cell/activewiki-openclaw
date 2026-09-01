@@ -5,6 +5,20 @@ All notable changes to the ActiveWiki project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-09-01
+
+### Performance
+- mmap search cache for `vectordb.py search` (`vectordb/search_cache/`,
+  gitignored): embedding matrix as `vecs.npy` loaded via `np.load` mmap plus
+  metadata as `meta.json` (id/scope/kind/ref/section/chunk_idx only — no
+  content, no pickle). Staleness via DB `mtime_ns`+size signature, with a
+  transparent one-shot rebuild (~20s) on the first search after an index
+  change; `build` refreshes the cache after each run. Atomic publish via
+  pid-suffixed temp files, `os.replace`, and fsync; cache directory 0700,
+  files 0600. Result content is fetched lazily from SQLite for the final
+  top-k only — the cache is never trusted for output content. Plugin search
+  path: ~18s → ~1s, keeping `memory_search` safely under the 15s core limit.
+
 ## [1.1.0] - 2026-08-26
 
 ### Added

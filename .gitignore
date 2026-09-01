@@ -6,6 +6,11 @@ activewiki.json
 __pycache__/
 *.pyc
 
+# Vektor-DB Search-Cache (baut sich automatisch neu)
+vectordb/
+*.tmp.npy
+*.tmp.json
+
 # Logs
 logs/
 trash/

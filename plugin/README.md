@@ -84,6 +84,7 @@ activewiki/
 - Whitelist ENV (no secrets leaked to subprocess)
 - Timeouts: 30s vector, 10s graph
 - Buffer limits: 2MB / 1MB
+- Search latency: `vectordb.py search` runs in ~1s thanks to the mmap search cache (see main README § Semantic Vector Search), keeping the core `memory_search` hard 15s limit safely satisfied. If the cache is missing/stale (`vectordb/search_cache/`), the first search transparently rebuilds it (~20s) and that single query hits the core timeout — every later one is green again.
 
 **`lib/scope-resolver.ts` — Scope Gating:**
 - Re-reads scopes config on each search (path from `activewiki.json` or `ACTIVEWIKI_SCOPES_CONFIG`)

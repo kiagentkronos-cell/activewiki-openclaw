@@ -2145,6 +2145,15 @@ def build_vectors() -> int:
     total_docs = sum(len(c) for c in doc_chunks.values())
     log("done", f" +{inserted} inserted, ~{unchanged_count} unchanged chunks, "
         f"-{deleted_docs} deleted docs{skip_note} ({total_docs} total chunks scanned) → {DB_PATH}")
+
+    # Refresh the search cache so the next search is fast (signature is
+    # re-read from the just-committed DB, so it matches the new state).
+    try:
+        rebuild_search_cache()
+        log("done", " search cache refreshed")
+    except Exception as exc:
+        log("warn", f"search cache refresh failed ({exc}); "
+            "next search will rebuild it transparently", stderr=True)
     return inserted
 
 
@@ -3703,11 +3712,226 @@ def build(run_graph: bool = False, page_slug: str | None = None,
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Search cache (mmap-able embedding matrix + meta without content)
+# ═══════════════════════════════════════════════════════════════════════
+# `search` needs the full embedding matrix (~170 MB float32) and lightweight
+# metadata for every chunk. Reading both from SQLite on every call costs
+# ~10s. This cache stores the matrix as a .npy (loaded via np.load mmap)
+# and the meta rows (WITHOUT content) as plain JSON, keyed by a signature
+# of the SQLite file (mtime_ns+size of the db and of a non-empty -wal).
+# Security: the cache directory is 0700 and cache files 0600, and the meta
+# format is JSON only (no pickle) — a cache file must never be an
+# arbitrary-code execution vector. The cache is NEVER trusted for output:
+# meta only carries id/scope/kind/ref/section/chunk_idx, and result
+# content is always re-read from SQLite (see _fetch_contents).
+# Row order is the chunks rowid order; the legacy SQL `WHERE scope IN (...)`
+# returns rows in the same relative order, so a positional scope filter over
+# the cached rows reproduces the legacy result order bit-for-bit.
+# Rebuild: `build` writes it; `search` rebuilds transparently when missing
+# or stale (then the one call is slow, every later one is fast).
+
+SEARCH_CACHE_DIR = VECTORDB / "search_cache"
+_SEARCH_CACHE_DIR_MODE = 0o700
+_SEARCH_CACHE_FILE_MODE = 0o600
+
+
+def _db_sig() -> tuple:
+    """Staleness signature: main-db mtime_ns+size, plus -wal if non-empty."""
+    st = os.stat(DB_PATH)
+    parts = [st.st_mtime_ns, st.st_size]
+    wal = DB_PATH.with_name(DB_PATH.name + "-wal")
+    try:
+        ws = os.stat(wal)
+        if ws.st_size > 0:
+            parts.extend([ws.st_mtime_ns, ws.st_size])
+    except OSError:
+        pass
+    return tuple(parts)
+
+
+def _search_cache_paths() -> tuple[Path, Path]:
+    return SEARCH_CACHE_DIR / "vecs.npy", SEARCH_CACHE_DIR / "meta.json"
+
+
+def _secure_existing(path: Path, mode: int) -> None:
+    """chmod with failure made loud (security-relevant)."""
+    try:
+        os.chmod(path, mode)
+    except OSError as exc:
+        log("warn", f"search cache: chmod({path.name}, {oct(mode)}) failed: {exc}",
+            stderr=True)
+
+
+def _gather_rows(v: np.ndarray, idx: list[int]) -> np.ndarray:
+    """Row-gather a row-sorted index list via contiguous runs.
+
+    Bit-identical to np.take but much faster on mmap sources: slicing a
+    contiguous run is a zero-copy view / linear copy instead of thousands
+    of random-access row copies. Verified bit-equal (incl. scope subsets).
+    """
+    if not idx:
+        return np.zeros((0, v.shape[1]), dtype=np.float32)
+    parts: list[np.ndarray] = []
+    s = p = idx[0]
+    for i in idx[1:]:
+        if i == p + 1:
+            p = i
+            continue
+        parts.append(np.ascontiguousarray(v[s:p + 1]))
+        s = p = i
+    parts.append(np.ascontiguousarray(v[s:p + 1]))
+    return parts[0] if len(parts) == 1 else np.concatenate(parts)
+
+
+def rebuild_search_cache() -> None:
+    """Write the search cache atomically from SQLite (all scopes, rowid order)."""
+    sig = _db_sig()  # captured BEFORE reading: a concurrent commit then only
+                     # causes one extra rebuild later, never a stale-fresh cache.
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT id, scope, kind, ref, section, chunk_idx, embedding FROM chunks"
+        ).fetchall()
+    finally:
+        conn.close()
+    if rows:
+        vecs = np.stack([np.frombuffer(r[6], dtype=np.float32) for r in rows])
+    else:
+        vecs = np.zeros((0, EMBED_DIMS), dtype=np.float32)
+    meta = [
+        {"id": r[0], "scope": r[1], "kind": r[2], "ref": r[3],
+         "section": r[4], "chunk_idx": r[5]}
+        for r in rows
+    ]
+    payload = {"sig": list(sig), "dims": EMBED_DIMS, "meta": meta}
+    SEARCH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _secure_existing(SEARCH_CACHE_DIR, _SEARCH_CACHE_DIR_MODE)
+    vec_path, meta_path = _search_cache_paths()
+    # Atomic publish: write to a pid-suffixed tmp file (0600), then
+    # os.replace(). Concurrent rebuilders each publish a complete snapshot;
+    # readers only ever see fully-written files.
+    tmp_vec = vec_path.with_name(f"vecs.{os.getpid()}.tmp.npy")
+    tmp_meta = meta_path.with_name(f"meta.{os.getpid()}.tmp.json")
+    try:
+        with open(tmp_vec, "wb") as fh:
+            np.save(fh, vecs, allow_pickle=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        _secure_existing(tmp_vec, _SEARCH_CACHE_FILE_MODE)
+        tmp_meta.write_bytes(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+        _secure_existing(tmp_meta, _SEARCH_CACHE_FILE_MODE)
+        os.replace(tmp_vec, vec_path)
+        os.replace(tmp_meta, meta_path)
+    finally:
+        for tmp in (tmp_vec, tmp_meta):
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+    # Drop a leftover pickle cache from an older version (security cleanup).
+    legacy = SEARCH_CACHE_DIR / "meta.pkl"
+    try:
+        legacy.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _load_search_cache() -> "tuple[np.ndarray, list[dict]] | None":
+    """Load the cache if present, fresh, and consistent. None on any miss."""
+    vec_path, meta_path = _search_cache_paths()
+    if not (vec_path.exists() and meta_path.exists()):
+        return None
+    try:
+        _secure_existing(SEARCH_CACHE_DIR, _SEARCH_CACHE_DIR_MODE)
+        payload = json.loads(meta_path.read_bytes().decode("utf-8"))
+        if payload.get("sig") != list(_db_sig()) or payload.get("dims") != EMBED_DIMS:
+            return None
+        meta = payload["meta"]
+        vecs = np.load(vec_path, mmap_mode="r", allow_pickle=False)
+        if vecs.shape != (len(meta), EMBED_DIMS) or vecs.dtype != np.float32:
+            return None
+        _secure_existing(meta_path, _SEARCH_CACHE_FILE_MODE)
+        _secure_existing(vec_path, _SEARCH_CACHE_FILE_MODE)
+        return vecs, meta
+    except Exception:
+        return None
+
+
+def _fetch_contents(chunk_ids: list[int]) -> dict[int, str]:
+    """Lazily fetch the content of a handful of chunks by id (read-only)."""
+    if not chunk_ids:
+        return {}
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    try:
+        placeholders = ",".join("?" * len(chunk_ids))
+        rows = conn.execute(
+            f"SELECT id, content FROM chunks WHERE id IN ({placeholders})",
+            chunk_ids,
+        ).fetchall()
+    finally:
+        conn.close()
+    return {r[0]: r[1] for r in rows}
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Search & Stats
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def load_index(allowed_scopes: list[str] | None = None) -> tuple[np.ndarray, list[dict]]:
+    """Load the embedding matrix + metadata for the scopes.
+
+    Fast path: the mmap-able search cache (see rebuild_search_cache). The
+    cached rows are in chunks-rowid order — the same relative order the
+    legacy `SELECT ... FROM chunks [WHERE scope IN (...)]` returned — and
+    the cached vectors are the exact BLOB bytes, so results are bit-for-bit
+    identical to the SQLite path. A transparent rebuild keeps the cache
+    fresh after index changes. On any cache problem we fall back to the
+    original SQLite read so search never breaks.
+
+    NOTE: on the cached path the meta dicts do NOT contain "content" —
+    callers (search) fetch it lazily for the final top-k via _fetch_contents
+    (the content of all rows is never read up front). The legacy path
+    returns meta exactly as before, content included.
+    """
+    cached = _load_search_cache()
+    if cached is None:
+        # Missing or stale (index.sqlite changed): rebuild transparently.
+        # This one call is slow; every later one hits the fresh cache.
+        try:
+            rebuild_search_cache()
+            cached = _load_search_cache()
+        except Exception as exc:
+            log("warn", f"search cache rebuild failed ({exc}); "
+                "falling back to direct SQLite read", stderr=True)
+    if cached is not None:
+        all_vecs, all_meta = cached
+        # Warm the mmap once (touch first row) so every caller — including
+        # early-return paths that never multiply — has the matrix hot
+        # before we hand it out.
+        if len(all_meta):
+            all_vecs[:1].sum()
+        if allowed_scopes:
+            allowed = set(allowed_scopes)
+            keep = [i for i, m in enumerate(all_meta) if m["scope"] in allowed]
+            if len(keep) == len(all_meta) and all_meta:
+                # Allowed scopes cover every row (e.g. private,family,public):
+                # no filtering needed at all — hand out the matrix directly,
+                # identical to the no-scope fast path (zero copy for the
+                # C-contiguous .npy; scores/meta are unchanged).
+                return np.ascontiguousarray(all_vecs), [dict(m) for m in all_meta]
+            if keep:
+                # Runs-gather: bit-identical to np.take, far cheaper on mmap.
+                vecs = _gather_rows(all_vecs, keep)
+                meta = [dict(all_meta[i]) for i in keep]
+                return vecs, meta
+            return np.zeros((0, EMBED_DIMS), dtype=np.float32), []
+        # All scopes: hand out the mmap matrix directly (ascontiguousarray
+        # is a zero-copy view for C-contiguous .npy); matmul faults pages
+        # in linearly (~1s first call on a cold page cache, then hot).
+        return np.ascontiguousarray(all_vecs), [dict(m) for m in all_meta]
     conn = sqlite3.connect(DB_PATH)
     if allowed_scopes:
         placeholders = ",".join("?" * len(allowed_scopes))
@@ -3765,8 +3989,19 @@ def search(
         return []
     q = embed([query])[0]
     scores = vecs @ q
+
+    # Slim meta for the final results: the cached path keeps content out of
+    # meta; fetch it lazily for just the top-k (legacy path already has it).
+    def _row(i: int) -> dict:
+        m = meta[i]
+        if "content" in m:
+            return dict(m)
+        row = {k: v for k, v in m.items() if k != "content"}
+        row["content"] = _fetch_contents([m["id"]]).get(m["id"], "")
+        return row
+
     top = np.argsort(-scores)[:k]
-    return [{**meta[i], "score": float(scores[i])} for i in top]
+    return [{**_row(int(i)), "score": float(scores[i])} for i in top]
 
 
 def stats() -> dict:

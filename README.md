@@ -47,6 +47,7 @@ Done. Your agent now searches your wiki in every response.
 - Embed all wiki documents using Ollama (bge-m3)
 - Automatic chunking with Docling for PDFs and DOCX files
 - Over-fetching with relevance scoring for optimal context window usage
+- **Search cache** (`vectordb/search_cache/`, gitignored): mmap-able `vecs.npy` + `meta.json` (id/scope/kind/ref/section/chunk_idx only — **no content**, **no pickle**). Invalidated via DB mtime_ns+size (`_db_sig()`), rebuilt transparently on the first `search` after an index change (~20s once). Atomic publish via pid-suffixed temp files + `os.replace` + fsync; directory 0700, files 0600. Result content is always loaded lazily from SQLite for the final top-k hits — the cache is never trusted for output content. Effect: plugin search ~18s → ~1s. To drop the cache: delete the folder, it rebuilds itself.
 
 ### Knowledge Graph
 - **Entity extraction** from documents via configurable LLM (OpenAI-compatible API) — automatically identifies people, places, organizations, and concepts

@@ -1,6 +1,6 @@
 {
   "name": "@kiagentkronos-cell/activewiki",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "type": "module",
   "private": false,
   "description": "ActiveWiki MemoryCorpusSupplement plugin for OpenClaw — vector search + knowledge graph over a configurable wiki corpus",
