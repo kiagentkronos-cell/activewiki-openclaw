@@ -24,9 +24,33 @@ import urllib.request
 from pathlib import Path
 
 LLM_ENDPOINT = "http://localhost:8000/v1/chat/completions"
-LLM_TIMEOUT = int(os.environ.get("ACTIVEWIKI_CHECK_TIMEOUT", "120"))
+LLM_TIMEOUT_DEFAULT = 120  # Fallback ohne Config-Key (Abwärtskompatibilität)
 SOURCE_FULL_MAX = 30000
 SOURCE_PART = 10000
+
+
+def resolve_llm_timeout() -> int:
+    """LLM-Timeout in Sekunden — Priorität: Env > Config > Default.
+
+    1. ACTIVEWIKI_CHECK_TIMEOUT (Env, wie bisher)
+    2. quality_check.timeout_seconds aus activewiki.json
+    3. Default 120 (kein Fail-Fast bei fehlendem Key)
+    """
+    env = os.environ.get("ACTIVEWIKI_CHECK_TIMEOUT")
+    if env:
+        return int(env)
+    try:
+        from config import load_config, get
+        cfg = load_config()
+        val = get(cfg, "quality_check.timeout_seconds")
+        if val is not None:
+            return int(val)
+    except Exception:
+        pass  # Config fehlt/unlesbar → Default (Check darf nicht crashen)
+    return LLM_TIMEOUT_DEFAULT
+
+
+LLM_TIMEOUT = resolve_llm_timeout()
 
 
 def default_output_dir() -> Path:
@@ -487,19 +511,22 @@ def _is_timeout_error(e: BaseException) -> bool:
 
 
 def default_llm_call(system: str, user: str) -> str:
-    """Echter vLLM-Call (OpenAI-kompatibel), Timeout 120s.
+    """Echter vLLM-Call (OpenAI-kompatibel), Timeout aus resolve_llm_timeout()
+    (Env ACTIVEWIKI_CHECK_TIMEOUT > quality_check.timeout_seconds > 120s).
 
     Retry-Regel: bei Timeout EINE Wiederholung nach ~10s Pause. Bei
     anderen Fehlern (HTTP 4xx/5xx, JSON-Parser, content=null, ...) wird
     KEIN Retry gemacht — der Fehler wird sofort (mit EINEM Präfix) als
     RuntimeError nach oben gereicht.
 
-    Config: llm.model + llm.temperature aus activewiki.json.
+    Config: llm.model + llm.temperature + quality_check.timeout_seconds
+    aus activewiki.json.
     """
     from config import load_config, llm_model, llm_temperature
     cfg = load_config()
     model = llm_model(cfg)
     temperature = llm_temperature(cfg)
+    timeout = resolve_llm_timeout()
     payload = {
         "model": model,
         "temperature": temperature,
@@ -518,7 +545,7 @@ def default_llm_call(system: str, user: str) -> str:
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
             )
-            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             text = data["choices"][0]["message"]["content"]
             if text is None:

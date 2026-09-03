@@ -107,6 +107,7 @@ See [`plugin/README.md`](plugin/README.md) for the full Prompt Evolution Pipelin
 - **Frontmatter tracking** — `check_status` (`clean|issues|patched|error|uncheckable`), `last_check`, `last_check_model` are maintained per page; clean/patched pages are not re-checked for 30 days.
 - **2-commit pattern** — a successful body patch produces two git commits: `quality-check: <slug> check` (frontmatter `issues`, body unpatched) followed by `quality-check: <slug> patch` (body patched, `check_status: patched`). Without a valid patch, a single `check` commit is written. Commits are skipped on a dirty repo (safety guard).
 - **Reports** — one JSON report per page under `quality/results/` with `issues`, `filtered_self_contradictions`, and `patch: {patched, applied, skipped[claim+reason]}`.
+- **Configurable LLM timeout** — the per-call LLM timeout resolves in priority order: `ACTIVEWIKI_CHECK_TIMEOUT` env var > `quality_check.timeout_seconds` in `activewiki.json` > script default 120s. A missing config key never fails fast (the check falls back to 120s); the example config ships 600s for slow/large-model setups. Retry logic unchanged: one retry after ~10s pause on timeout only.
 
 CLI:
 ```bash

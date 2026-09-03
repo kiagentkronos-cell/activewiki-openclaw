@@ -53,5 +53,10 @@
     "deadline": "03:00",
     "timezone": "Europe/Berlin",
     "_comment": "Hard deadline in local time. Distillation stops here; vector/graph build continues."
+  },
+
+  "quality_check": {
+    "timeout_seconds": 600,
+    "_comment": "LLM timeout per call in the nightly quality check (scripts/check.py). Env ACTIVEWIKI_CHECK_TIMEOUT overrides this value; script default without config key is 120s. Retry logic unchanged: one retry after ~10s pause on timeout."
   }
 }

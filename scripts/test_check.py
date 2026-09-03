@@ -1407,5 +1407,59 @@ class TestOldestSelectionE2E(unittest.TestCase):
             self.assertEqual(picked[0]["path"].name, "a-oldest.md")
 
 
+# ── 4d. LLM-Timeout-Resolution: Env > Config > Default ──────────────────────
+
+class TestLlmTimeoutResolution(unittest.TestCase):
+    """resolve_llm_timeout(): ACTIVEWIKI_CHECK_TIMEOUT (Env) überschreibt
+    quality_check.timeout_seconds (activewiki.json), das überschreibt den
+    Default 120. Fehlender Config-Key → Default (Abwärtskompatibilität,
+    KEIN Fail-Fast)."""
+
+    def _write_config(self, tmp: Path, cfg: dict) -> None:
+        (tmp / "activewiki.json").write_text(
+            json.dumps(cfg), encoding="utf-8")
+
+    def _run(self, cfg: dict, env_value: str | None) -> int:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            self._write_config(tmp, cfg)
+            old_env = os.environ.get("ACTIVEWIKI_CONFIG")
+            old_timeout = os.environ.get("ACTIVEWIKI_CHECK_TIMEOUT")
+            os.environ["ACTIVEWIKI_CONFIG"] = str(tmp / "activewiki.json")
+            if env_value is None:
+                os.environ.pop("ACTIVEWIKI_CHECK_TIMEOUT", None)
+            else:
+                os.environ["ACTIVEWIKI_CHECK_TIMEOUT"] = env_value
+            try:
+                return check.resolve_llm_timeout()
+            finally:
+                if old_env is None:
+                    os.environ.pop("ACTIVEWIKI_CONFIG", None)
+                else:
+                    os.environ["ACTIVEWIKI_CONFIG"] = old_env
+                if old_timeout is None:
+                    os.environ.pop("ACTIVEWIKI_CHECK_TIMEOUT", None)
+                else:
+                    os.environ["ACTIVEWIKI_CHECK_TIMEOUT"] = old_timeout
+
+    def test_config_value_wins_over_default(self):
+        """quality_check.timeout_seconds gesetzt → Config-Wert, kein Env."""
+        self.assertEqual(
+            self._run({"quality_check": {"timeout_seconds": 600}}, None), 600)
+
+    def test_missing_key_falls_back_to_default_120(self):
+        """Key fehlt in activewiki.json → Default 120 (kein Fail-Fast)."""
+        self.assertEqual(self._run({}, None), 120)
+
+    def test_env_overrides_config(self):
+        """Env-Var überschreibt Config-Wert (Priorität Env > Config)."""
+        self.assertEqual(
+            self._run({"quality_check": {"timeout_seconds": 600}}, "33"), 33)
+
+    def test_env_without_config_key(self):
+        """Env ohne Config-Key → Env-Wert (Abwärtskompatibilität)."""
+        self.assertEqual(self._run({}, "45"), 45)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

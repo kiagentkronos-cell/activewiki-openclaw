@@ -5,6 +5,18 @@ All notable changes to the ActiveWiki project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-09-03
+
+### Added
+- Configurable LLM timeout for the nightly quality check (`scripts/check.py`):
+  new `resolve_llm_timeout()` resolves the per-call timeout as
+  `ACTIVEWIKI_CHECK_TIMEOUT` env var > `quality_check.timeout_seconds` in
+  `activewiki.json` > script default 120s. A missing config key never fails
+  fast (falls back to the 120s default); invalid/unreadable config is ignored
+  with the default retained. Retry logic unchanged (one retry after ~10s
+  pause, timeouts only). `activewiki.example.json` documents the new key with
+  600s; 4 new resolution tests in `test_check.py` (90 total).
+
 ## [1.1.1] - 2026-09-01
 
 ### Performance
