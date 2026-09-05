@@ -25,6 +25,9 @@ from pathlib import Path
 
 LLM_ENDPOINT = "http://localhost:8000/v1/chat/completions"
 LLM_TIMEOUT_DEFAULT = 120  # Fallback ohne Config-Key (Abwärtskompatibilität)
+LLM_MAX_TOKENS_DEFAULT = 4096  # Fallback ohne Config-Key (Abwärtskompatibilität)
+LLM_MAX_TOKENS_CAP = 32768  # Obergrenze: Schutz vor vLLM-Crash durch
+                            # max_tokens-Mismatch
 SOURCE_FULL_MAX = 30000
 SOURCE_PART = 10000
 
@@ -51,6 +54,55 @@ def resolve_llm_timeout() -> int:
 
 
 LLM_TIMEOUT = resolve_llm_timeout()
+
+
+def _coerce_max_tokens(raw_val, source: str) -> int | None:
+    """1-Wert → geprüfte Tokenzahl oder None (dann nächste Prioritätsstufe).
+
+    Kein Fail-Fast: Müll, 0, negativ → None (ignoriert). Riesige Werte
+    werden an LLM_MAX_TOKENS_CAP gekappt (Prompt + max_tokens muss ins
+    Context-Fenster passen — ein Mismatch hat schon mal vLLM gecrasht).
+    """
+    try:
+        val = int(str(raw_val).strip())
+    except (TypeError, ValueError):
+        return None  # keine Zahl → ignoriert (kein Crash beim Import/Call)
+    if val <= 0:
+        return None
+    if val > LLM_MAX_TOKENS_CAP:
+        print(f"[quality-check] WARNING {source}: max_tokens {val} über "
+              f"Obergrenze → gekappt auf {LLM_MAX_TOKENS_CAP}",
+              file=sys.stderr)
+        return LLM_MAX_TOKENS_CAP
+    return val
+
+
+def resolve_max_tokens() -> int:
+    """max_tokens pro LLM-Call — Priorität: Env > Config > Default.
+
+    1. ACTIVEWIKI_CHECK_MAX_TOKENS (Env, analog ACTIVEWIKI_CHECK_TIMEOUT)
+    2. quality_check.max_tokens aus activewiki.json
+    3. Default 4096 (kein Fail-Fast bei fehlendem Key)
+
+    Unsinnswerte (keine Zahl, 0, negativ) werden ignoriert und die
+    nächste Stufe greift; Werte über 32768 werden gekappt.
+    """
+    env = os.environ.get("ACTIVEWIKI_CHECK_MAX_TOKENS")
+    if env:
+        val = _coerce_max_tokens(env, "Env ACTIVEWIKI_CHECK_MAX_TOKENS")
+        if val is not None:
+            return val
+    try:
+        from config import load_config, get
+        cfg = load_config()
+        val = get(cfg, "quality_check.max_tokens")
+        if val is not None:
+            coerced = _coerce_max_tokens(val, "quality_check.max_tokens")
+            if coerced is not None:
+                return coerced
+    except Exception:
+        pass  # Config fehlt/unlesbar → Default (Check darf nicht crashen)
+    return LLM_MAX_TOKENS_DEFAULT
 
 
 def default_output_dir() -> Path:
@@ -478,19 +530,84 @@ def filter_self_contradictions(issues: list[dict]) -> tuple[list[dict], list[str
     return kept, dropped_claims
 
 
-def parse_llm_answer(raw: str) -> tuple[dict | None, str]:
-    """Robustes JSON-Parsing: erstes '{' bis letztes '}'.
+def _scan_balanced_json(text: str, start: int) -> int | None:
+    """Scanne ab text[start] == '{' bis der Klammer-Ausgleich erreicht ist.
 
-    Returns: (parsed_dict|None, raw) — bei Parse-Fehler (None, raw).
+    Strings und Escapes werden beachtet (Klammern in Strings zählen nicht).
+    Returns Index HINTER dem abschließenden '}' oder None (unbalanciert →
+    typisch für max_tokens-Trunkierung).
     """
-    if not raw or "{" not in raw or "}" not in raw:
-        return None, raw
-    candidate = raw[raw.index("{"): raw.rindex("}") + 1]
-    try:
-        parsed = json.loads(candidate)
-    except json.JSONDecodeError:
-        return None, raw
-    return (parsed if isinstance(parsed, dict) else None), raw
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return None
+
+
+def _strip_code_fences(text: str) -> str:
+    """Markdown-Fences am Rand entfernen (```json … ``` / ``` … ```)."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        first_nl = stripped.find("\n")
+        if first_nl != -1:
+            stripped = stripped[first_nl + 1:]
+        elif stripped[3:] == "json":
+            stripped = ""
+        if stripped.rstrip().endswith("```"):
+            stripped = stripped.rstrip()[:-3]
+    return stripped
+
+
+def parse_llm_answer(raw: str) -> tuple[dict | None, str, str]:
+    """Robustes JSON-Parsing mit Klammer-Scanner und Unterscheidungsgrund.
+
+    Returns: (parsed_dict|None, raw, grund) — grund ist "" bei Erfolg,
+    "abgeschnitten (max_tokens zu klein?)" bei unbalanciertem JSON
+    (Trunkierung) und "kein JSON" bei Prosa/unerfolgreichem Parse.
+    Markdown-Fences am Rand werden entfernt; Kandidaten sind alle balancierten
+    {...}-Blöcke (Strings/Escapes beachtet), nicht blind erstes-bis-letztes.
+    """
+    if not raw:
+        return None, raw, "kein JSON"
+    body = _strip_code_fences(raw)
+    if "{" not in body:
+        return None, raw, "kein JSON"
+    # Fehlendeschließende Klammer(n) werden vom Scanner als unbalanciert
+    # erkannt → "abgeschnitten" (Trunkierungs-Hinweis), nicht "kein JSON".
+    saw_unbalanced = False
+    pos = body.find("{")
+    while pos != -1:
+        end = _scan_balanced_json(body, pos)
+        if end is None:
+            saw_unbalanced = True  # Rest des Textes kann nur unbalanciert sein
+            break
+        try:
+            parsed = json.loads(body[pos:end])
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed, raw, ""
+        pos = body.find("{", pos + 1)
+    return (None, raw,
+            "abgeschnitten (max_tokens zu klein?)" if saw_unbalanced
+            else "kein JSON")
 
 
 LLM_RETRY_DELAY_SEC = 10.0  # Pause vor dem EINZIGEN Timeout-Retry
@@ -534,7 +651,7 @@ def default_llm_call(system: str, user: str) -> str:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "max_tokens": 4096,
+        "max_tokens": resolve_max_tokens(),
         "chat_template_kwargs": {"enable_thinking": False},
     }
     last_error: Exception | None = None
@@ -631,11 +748,12 @@ def build_llm_user_prompt(page_name: str, page_body: str,
     return "\n".join(parts)
 
 
-def llm_prose_check(system: str, user: str, llm_call) -> tuple[dict | None, str]:
+def llm_prose_check(system: str, user: str,
+                    llm_call) -> tuple[dict | None, str, str]:
     """LLM-Prosa-Check (eigene, mockbare Funktion).
 
-    llm_call(system, user) → Roh-String. Parse-Fehler → (None, raw),
-    kein Crash — der Caller markiert status 'error'.
+    llm_call(system, user) → Roh-String. Parse-Fehler → (None, raw, grund),
+    kein Crash — der Caller markiert status 'error' und schreibt den Grund.
     """
     raw = llm_call(system, user)
     return parse_llm_answer(raw)
@@ -705,9 +823,10 @@ def check_page(page: Path, *, sources_root: Path,
     checked_claims = len(issues)
     filtered_self_contradictions: list[str] = []
     llm_raw_text: str | None = None
+    llm_grund: str = ""
     if not missing:
         try:
-            llm_result, llm_raw_text = llm_prose_check(
+            llm_result, llm_raw_text, llm_grund = llm_prose_check(
                 load_system_prompt(),
                 build_llm_user_prompt(page.stem, body, source_texts,
                                       source_names, det_issues=issues),
@@ -721,14 +840,18 @@ def check_page(page: Path, *, sources_root: Path,
             if msg.startswith(prefix):
                 msg = msg[len(prefix):]
             llm_result, llm_raw_text = None, prefix + msg
+            llm_grund = "LLM-Call fehlgeschlagen"
         if llm_result is None:
             status = "error"
+            reason = f" ({llm_grund})" if llm_grund else ""
             issues.append({
                 "severity": "unbelegt",
-                "claim_in_page": "LLM-Antwort konnte nicht geparst werden",
+                "claim_in_page": f"LLM-Antwort konnte nicht geparst werden{reason}",
                 "source_ref": "llm",
                 "evidence": (llm_raw_text or "")[:300],
-                "fix_hint": "Prüfung erneut ausführen (LLM-Instabilität)",
+                "fix_hint": ("max_tokens erhöhen (quality_check.max_tokens) "
+                             "und erneut prüfen" if "abgeschnitten" in llm_grund
+                             else "Prüfung erneut ausführen (LLM-Instabilität)"),
                 "origin": "llm",
             })
         else:

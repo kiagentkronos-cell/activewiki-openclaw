@@ -5,6 +5,30 @@ All notable changes to the ActiveWiki project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-09-05
+
+### Added
+- Configurable `max_tokens` for the nightly quality check
+  (`scripts/check.py`): new `resolve_max_tokens()` resolves the per-call
+  output budget as `ACTIVEWIKI_CHECK_MAX_TOKENS` env var >
+  `quality_check.max_tokens` in `activewiki.json` > script default 4096.
+  Values above the hard cap 32768 are clamped with a warning (protects the
+  model context window); garbage values (non-numeric, 0, negative) are
+  ignored so the next priority level applies. A missing config key never
+  fails fast. `activewiki.example.json` documents the new key.
+
+### Changed
+- `parse_llm_answer()` hardened: now returns `(parsed, raw, grund)` and
+  distinguishes failure causes — `""` on success, `abgeschnitten
+  (max_tokens zu klein?)` on truncated (unbalanced) JSON, `kein JSON` on
+  prose. Parsing uses a balanced-brace scanner that respects string
+  escapes (instead of blind first-`{`-to-last-`}`) and strips Markdown
+  code fences at the edges. On truncation, the report's error issue names
+  the reason and `fix_hint` suggests raising `quality_check.max_tokens`.
+- 13 new tests in `test_check.py` (103 total): max_tokens resolution
+  (Env > Config > Default, cap, garbage handling) and parser hardening
+  (fences, truncation, prose, nested braces in strings).
+
 ## [1.1.2] - 2026-09-03
 
 ### Added

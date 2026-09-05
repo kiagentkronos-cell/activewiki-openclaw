@@ -680,12 +680,12 @@ class TestSelfContradictionFilter(unittest.TestCase):
 class TestLLMParseAndSchema(unittest.TestCase):
     def test_parse_llm_json_robust(self):
         raw = "Hier ist das Ergebnis:\n" + LLM_CLEAN + "\nDanke!"
-        parsed, _ = check.parse_llm_answer(raw)
+        parsed, _, _ = check.parse_llm_answer(raw)
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed["status"], "clean")
 
     def test_parse_llm_json_garbage_no_crash(self):
-        parsed, raw_kept = check.parse_llm_answer("kein JSON hier, nur Prosa {unvollständig")
+        parsed, raw_kept, _ = check.parse_llm_answer("kein JSON hier, nur Prosa {unvollständig")
         self.assertIsNone(parsed)
         self.assertIn("kein JSON", raw_kept)
 
@@ -1459,6 +1459,139 @@ class TestLlmTimeoutResolution(unittest.TestCase):
     def test_env_without_config_key(self):
         """Env ohne Config-Key → Env-Wert (Abwärtskompatibilität)."""
         self.assertEqual(self._run({}, "45"), 45)
+
+
+# ── 4e. LLM-max_tokens-Resolution: Env > Config > Default ────────────────────
+
+class TestMaxTokensResolution(unittest.TestCase):
+    """resolve_max_tokens(): ACTIVEWIKI_CHECK_MAX_TOKENS (Env) überschreibt
+    quality_check.max_tokens (activewiki.json), das überschreibt den
+    Default 4096. Fehlender Key → Default (Abwärtskompatibilität, KEIN
+    Fail-Fast). Unsinnswerte (0, negativ, Müll) werden ignoriert, Werte
+    über der Obergrenze (32768) gekappt — ein max_tokens-Mismatch kann
+    den vLLM-Server crashen."""
+
+    def _run(self, cfg: dict, env_value: str | None) -> int:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / "activewiki.json").write_text(json.dumps(cfg),
+                                                 encoding="utf-8")
+            old_env = os.environ.get("ACTIVEWIKI_CONFIG")
+            old_mt = os.environ.get("ACTIVEWIKI_CHECK_MAX_TOKENS")
+            os.environ["ACTIVEWIKI_CONFIG"] = str(tmp / "activewiki.json")
+            if env_value is None:
+                os.environ.pop("ACTIVEWIKI_CHECK_MAX_TOKENS", None)
+            else:
+                os.environ["ACTIVEWIKI_CHECK_MAX_TOKENS"] = env_value
+            try:
+                return check.resolve_max_tokens()
+            finally:
+                if old_env is None:
+                    os.environ.pop("ACTIVEWIKI_CONFIG", None)
+                else:
+                    os.environ["ACTIVEWIKI_CONFIG"] = old_env
+                if old_mt is None:
+                    os.environ.pop("ACTIVEWIKI_CHECK_MAX_TOKENS", None)
+                else:
+                    os.environ["ACTIVEWIKI_CHECK_MAX_TOKENS"] = old_mt
+
+    def test_config_wins_over_default(self):
+        self.assertEqual(
+            self._run({"quality_check": {"max_tokens": 8192}}, None), 8192)
+
+    def test_missing_key_falls_back_to_default_4096(self):
+        """Key fehlt → Default 4096 (Abwärtskompatibilität, kein Fail-Fast)."""
+        self.assertEqual(self._run({}, None), 4096)
+
+    def test_env_overrides_config(self):
+        self.assertEqual(
+            self._run({"quality_check": {"max_tokens": 8192}}, "12000"), 12000)
+
+    def test_env_without_config_key(self):
+        self.assertEqual(self._run({}, "5000"), 5000)
+
+    def test_garbage_env_ignored_falls_to_config(self):
+        """Müll/Nicht-Zahl in der Env → ignorieren und Config-Wert nehmen."""
+        self.assertEqual(
+            self._run({"quality_check": {"max_tokens": 8192}}, "unsinn"), 8192)
+
+    def test_nonpositive_values_ignored(self):
+        """0 oder negativ ergibt sinnlose Requests → Default."""
+        self.assertEqual(self._run({"quality_check": {"max_tokens": 0}}, None), 4096)
+        self.assertEqual(self._run({}, "-5"), 4096)
+
+    def test_cap_protects_against_oversized_values(self):
+        """Über der Obergrenze → gekappt (Schutz vor vLLM-Crash)."""
+        self.assertEqual(self._run({}, "999999"), 32768)
+
+
+# ── 15. Parser-Härtung: Fences, Klammer-Scanner, Unterscheidungsgrund ────────
+
+class TestParseLLMAnswerHardened(unittest.TestCase):
+    """parse_llm_answer liefert (parsed|None, raw, grund)."""
+
+    SAMPLE = json.dumps({"status": "clean", "issues": [],
+                         "checked_claims": 3}, ensure_ascii=False)
+
+    def test_markdown_fence_ok(self):
+        """JSON in ```json-Fences am Rand → sauber geparst, grund leer."""
+        raw = "```json\n" + self.SAMPLE + "\n```"
+        parsed, raw_kept, grund = check.parse_llm_answer(raw)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["status"], "clean")
+        self.assertEqual(grund, "")
+        self.assertEqual(raw_kept, raw)
+
+    def test_pro_and_post_text_ok(self):
+        """Prä-/Post-Text um komplettes JSON → geparst (Scanner, kein rindex)."""
+        raw = "Hier ist das Ergebnis:\n" + self.SAMPLE + "\nViel Erfolg!"
+        parsed, _, grund = check.parse_llm_answer(raw)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(grund, "")
+
+    def test_nested_braces_in_strings_ok(self):
+        """Geschweifte Klammern in Strings/Strings mit Escapes dürfen die
+        Balancierung nicht verschieben."""
+        payload = json.dumps({"status": "issues", "checked_claims": 1,
+                              "issues": [{"claim_in_page": "Musterort {A} \"x}\"",
+                                          "severity": "mittel"}]})
+        raw = "Vorwort {ok} " + payload + " Nachwort }"
+        parsed, _, grund = check.parse_llm_answer(raw)
+        # Erster { gehört zu "Vorwort {ok}" → balanciert, aber kein Dict-JSON
+        # → kein Crash; Ergebnis ist dict oder None, grund ist ein String.
+        self.assertIsInstance(grund, str)
+
+    def test_truncated_json_reports_abgeschnitten(self):
+        """Mitten im JSON abgeschnitten → (None, raw, 'abgeschnitten …')."""
+        raw = '{"status": "issues", "issues": [{"claim_in_page": "Musterstraße 1'
+        parsed, raw_kept, grund = check.parse_llm_answer(raw)
+        self.assertIsNone(parsed)
+        self.assertEqual(raw_kept, raw)
+        self.assertIn("abgeschnitten", grund)
+
+    def test_prose_reports_kein_json(self):
+        """Prosa ohne JSON → (None, raw, 'kein JSON')."""
+        parsed, raw_kept, grund = check.parse_llm_answer(
+            "Die Seite enthält keine überprüfbaren Aussagen.")
+        self.assertIsNone(parsed)
+        self.assertEqual(raw_kept, "Die Seite enthält keine überprüfbaren Aussagen.")
+        self.assertEqual(grund, "kein JSON")
+
+    def test_check_page_error_carries_grund(self):
+        """Trunkierte LLM-Antwort: Report-error-Feld nennt den Grund."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ctx = make_fake_wiki(tmp)
+            truncated = json.dumps(
+                {"status": "issues", "checked_claims": 2,
+                 "issues": [{"claim_in_page": "Musterort", "severity": "mittel"}]}
+            )[:40]
+            result = check.check_page(
+                ctx["page"], sources_root=tmp / "sources",
+                output_dir=None, llm_call=mock_llm(truncated))
+            self.assertEqual(result["status"], "error")
+            hint = json.dumps(result["issues"], ensure_ascii=False)
+            self.assertIn("abgeschnitten", hint)
 
 
 if __name__ == "__main__":

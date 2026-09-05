@@ -57,6 +57,7 @@
 
   "quality_check": {
     "timeout_seconds": 600,
-    "_comment": "LLM timeout per call in the nightly quality check (scripts/check.py). Env ACTIVEWIKI_CHECK_TIMEOUT overrides this value; script default without config key is 120s. Retry logic unchanged: one retry after ~10s pause on timeout."
+    "max_tokens": 4096,
+    "_comment": "LLM timeout per call in the nightly quality check (scripts/check.py). Env ACTIVEWIKI_CHECK_TIMEOUT overrides this value; script default without config key is 120s. Retry logic unchanged: one retry after ~10s pause on timeout. max_tokens per LLM call: Env ACTIVEWIKI_CHECK_MAX_TOKENS overrides this value; script default without config key is 4096, hard cap 32768 (protects the vLLM context window). Increase when reports say 'abgeschnitten (max_tokens zu klein?)'."
   }
 }
