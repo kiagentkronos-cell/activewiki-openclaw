@@ -129,9 +129,11 @@ activewiki/
 - JSON reports under `<wikis_root>/quality/results/`; 86 unit tests in `test_check.py`
 
 **`run_inbox.sh` — Master Pipeline:**
-- Coordinates all phases: Ingest → Distill → Auto-commit → Quality Check → Vectordb → Graph
+- Coordinates all phases: Ingest → Distill → Auto-commit → Quality Check → Vectordb → Graph HTML
 - QC phase runs after distill (patches get indexed in the same run) and only when the inbox is empty, before 02:30
 - Deadline-respecting (configurable)
+- Budget-gated tail phases (`ingest.budget_seconds`): phases past the run budget are skipped
+- Graph HTML phase (`vectordb.py graph html --all`, after Vectordb): atomically publishes `output/graph_latest.html` (temp + `mv`), hard-capped by `graph-html.timeout_seconds` (default 1200s), fail-safe (failure never aborts the run). Serve via `deploy/wikis-graph.service` (port 8090, `serve/` symlink)
 - Lock file (no parallel runs)
 
 ---
@@ -335,5 +337,7 @@ Copy `activewiki.example.json` to `activewiki.json` and adapt.
 | `distill.rollup_all` | bool | true | Bottom-up rollup of wiki hierarchy |
 | `ingest.deadline` | string | "03:00" | Pipeline stops at this time |
 | `ingest.timezone` | string | "Europe/Berlin" | Timezone for deadline |
+| `ingest.budget_seconds` | int | 16200 | Whole-run budget; tail phases skip past budget |
+| `graph-html.timeout_seconds` | int | 1200 | Hard timeout for the daily graph HTML export |
 
 Complete template with all options and comments: `activewiki.example.json`.

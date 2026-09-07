@@ -52,7 +52,13 @@
   "ingest": {
     "deadline": "03:00",
     "timezone": "Europe/Berlin",
-    "_comment": "Hard deadline in local time. Distillation stops here; vector/graph build continues."
+    "budget_seconds": 16200,
+    "_comment": "Hard deadline in local time. Distillation stops here; vector/graph build continues. budget_seconds caps the whole run (tail phases skip past budget)."
+  },
+
+  "graph-html": {
+    "timeout_seconds": 1200,
+    "_comment": "Hard timeout for the daily graph HTML export (run_inbox.sh phase graph-html, via timeout; exit 124 = timeout). The HTML is atomically published to output/graph_latest.html and served via deploy/wikis-graph.service on port 8090."
   },
 
   "quality_check": {

@@ -42,6 +42,13 @@ DEADLINE="$(get_cfg ingest.deadline)"
 TIMEZONE="$(get_cfg ingest.timezone)"
 DOCLING_VENV="$(get_cfg ocr.venv_path)"
 
+# Whole-run budget in seconds (caps the night window incl. QC/vectordb/graph-html).
+# ingest.deadline is independent — it only stops ingest/distill.
+BUDGET_SECONDS="$(get_cfg ingest.budget_seconds)"
+BUDGET_SECONDS="${BUDGET_SECONDS:-16200}"
+GH_TIMEOUT="$(get_cfg graph-html.timeout_seconds)"
+GH_TIMEOUT="${GH_TIMEOUT:-1200}"
+
 export WIKIS_DEADLINE="${DEADLINE:-03:00}"
 export WIKIS_TIMEZONE="${TIMEZONE:-Europe/Berlin}"
 
@@ -62,6 +69,12 @@ stamp() { TZ="$WIKIS_TIMEZONE" date +"%Y-%m-%dT%H:%M:%S %Z"; }
 # leaving buffer for vectordb + graph build.
 past_deadline() {
     [ "$(date +%H:%M)" \> "$WIKIS_DEADLINE" ]
+}
+
+RUN_START_EPOCH="$(date +%s)"
+BUDGET_DEADLINE_EPOCH=$((RUN_START_EPOCH + BUDGET_SECONDS))
+past_budget() {
+    [ "$(date +%s)" -ge "$BUDGET_DEADLINE_EPOCH" ]
 }
 
 exec 9>logs/.ingest.lock
@@ -174,6 +187,46 @@ if "$PYTHON" scripts/vectordb.py build $GRAPH_FLAG --communities --communities-i
     echo "[$(stamp)] vectordb end ok" >>"$LOG"
 else
     echo "[$(stamp)] vectordb failed (exit $?)" >>"$LOG"
+fi
+
+# ── Graph-HTML phase ─────────────────────────────────────────────────────────
+# Produces a daily interactive D3.js graph HTML (all communities) for LAN
+# access via http://<your-host>:8090/graph_latest.html (unit:
+# deploy/wikis-graph.service). Runs AFTER vectordb (needs fresh graph tables),
+# before any post-processing phases. Deadline handling like vectordb: run
+# anyway past deadline. Budget handling like the other tail phases: past
+# budget -> skip. Fail-safe: a failure here does NOT abort the run (rc is
+# only logged). Atomic: temp file inside output/ + mv (same filesystem block
+# => atomic rename) — HTTP readers never see a half-written graph_latest.html.
+if past_deadline; then
+    echo "[$(stamp)] past deadline $WIKIS_DEADLINE, running graph-html anyway" >>"$LOG"
+fi
+
+if past_budget; then
+    echo "[$(stamp)] skipped graph-html: run budget (${BUDGET_SECONDS}s) exceeded" >>"$LOG"
+else
+    echo "[$(stamp)] graph-html start (graph html --all, timeout=${GH_TIMEOUT}s)" >>"$LOG"
+    mkdir -p output
+    GH_TMP="$(mktemp "output/.graph_latest.XXXXXX")"
+    GH_OUT="$(mktemp)"
+    GH_RC=0
+    timeout "$GH_TIMEOUT" "$PYTHON" scripts/vectordb.py graph html --all >"$GH_OUT" 2>&1 || GH_RC=$?
+    # Sub-output into the main log (last lines contain the output path).
+    tail -n 20 "$GH_OUT" >>"$LOG" 2>/dev/null
+    GH_PATH="$(tail -n 1 "$GH_OUT" | tr -d '[:space:]')"
+    rm -f "$GH_OUT"
+    if [ "$GH_RC" -eq 0 ] && [ -n "$GH_PATH" ] && [ -s "$GH_PATH" ]; then
+        if cp "$GH_PATH" "$GH_TMP" && mv -f "$GH_TMP" "output/graph_latest.html"; then
+            echo "[$(stamp)] graph-html end ok (source: $GH_PATH)" >>"$LOG"
+        else
+            rm -f "$GH_TMP"
+            echo "[$(stamp)] graph-html publish failed (copy/mv error) — continuing run" >>"$LOG"
+        fi
+    else
+        rm -f "$GH_TMP"
+        # Exit code captured BEFORE the $(stamp) substitution (see QC phase).
+        echo "[$(stamp)] graph-html failed (exit $GH_RC) — continuing run" >>"$LOG"
+    fi
 fi
 
 echo "[$(stamp)] run end" >>"$LOG"

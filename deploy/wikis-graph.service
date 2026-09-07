@@ -1,0 +1,35 @@
+# wikis-graph.service — systemd USER unit
+# Statically serves the <wikis_root>/serve directory on port 8090 (reachable
+# from the LAN, analogous to a Grafana port). serve/ contains ONLY a symlink
+# to output/graph_latest.html (the nightly pipeline renews it daily via the
+# graph-html phase in scripts/run_inbox.sh). Old graph exports and zip
+# archives in output/ deliberately stay UNSERVED (private content).
+#
+# ⚠️ PASSE DIE PFADE AN DEINE EIGENE INSTALLATION AN:
+#   /pfad/zu/wikis = dein wikis_root aus activewiki.json.
+#
+# Symlink anlegen (einmalig):
+#   mkdir -p /pfad/zu/wikis/serve
+#   ln -sfn ../output/graph_latest.html /pfad/zu/wikis/serve/graph_latest.html
+#
+# Deployment:
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/wikis-graph.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now wikis-graph.service
+#   # Bei Abwesenheit eines Desktop-Logins ggf.:
+#   loginctl enable-linger $USER
+
+[Unit]
+Description=ActiveWiki Graph Visualization (static HTTP server, port 8090)
+After=network.target
+
+[Service]
+Type=simple
+# Pfad an eigene Installation anpassen (wikis_root/serve):
+ExecStart=/usr/bin/python3 -m http.server 8090 --bind 0.0.0.0 --directory /pfad/zu/wikis/serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

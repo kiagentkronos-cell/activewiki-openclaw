@@ -5,6 +5,27 @@ All notable changes to the ActiveWiki project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-09-07
+
+### Added
+- **Daily graph HTML in the nightly pipeline**: new `graph-html` phase in
+  `scripts/run_inbox.sh` (after vectordb) runs `vectordb.py graph html --all`
+  and publishes the result atomically (temp file + `mv` inside `output/`) to
+  `output/graph_latest.html`. Budget-gated via `ingest.budget_seconds`,
+  hard-capped via new config key `graph-html.timeout_seconds` (default 1200s),
+  runs past deadline, fail-safe: a failure of this phase never aborts the run.
+- **`deploy/wikis-graph.service`**: systemd user unit serving a dedicated
+  `serve/` directory (symlink to `output/graph_latest.html`) on port 8090.
+  Private artifacts in `output/` stay deliberately unserved. Paths are
+  placeholders — adjust to your installation.
+- **Home-screen app icon**: `assets/template.html` now embeds favicon (32x32)
+  and apple-touch-icon (180x180) inline as base64 plus `theme-color` and
+  web-app meta tags; the PNG sources live under `assets/`.
+
+### Fixed
+- `forceManyBody` in `assets/template.html` runs without `distanceMax`/`theta`
+  overrides — the force layout now matches the reference layout from 07/23.
+
 ## [1.1.3] - 2026-09-05
 
 ### Added
