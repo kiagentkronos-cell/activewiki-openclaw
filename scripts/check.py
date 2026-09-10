@@ -14,6 +14,7 @@ Exit: 0 = alle clean, 1 = Issues, 2 = Error
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -30,6 +31,10 @@ LLM_MAX_TOKENS_CAP = 32768  # Obergrenze: Schutz vor vLLM-Crash durch
                             # max_tokens-Mismatch
 SOURCE_FULL_MAX = 30000
 SOURCE_PART = 10000
+# Marker, den _trim_source() an gekürzte Quellen-Prompts hängt. Dient der
+# Prompt-Regie (Änderung A) und dem deterministischen Nachfilter als Signal.
+TRUNCATION_MARKER = ("Quelle gekürzt — Tabellen wurden separat "
+                     "deterministisch geprüft")
 
 
 def resolve_llm_timeout() -> int:
@@ -530,6 +535,67 @@ def filter_self_contradictions(issues: list[dict]) -> tuple[list[dict], list[str
     return kept, dropped_claims
 
 
+# Wörtliche Marker (historisch, aus dem Prompt-Vokabular des LLMs).
+TRUNCATION_EVIDENCE_MARKERS = (
+    "quelle gekürzt",
+    "separat deterministisch",
+    "tabellen wurden separat",
+)
+
+# Wortfamilie als Regex-Fallback: Das LLM formuliert die Kürzungs-Evidenz
+# regelmäßig um ("im gekürzten Auszug", "gekürzten Quellenauszug",
+# "gekürzten Teil", "Kürzung der Quelle") — wörtliche Marker allein ließen
+# in der Praxis 2026-09-09 23 von 24 Kürzungs-Artefakten durch.
+# False-Positive-Abwägung: Der Filter verlangt zusätzlich origin=llm UND
+# severity=contradiction (filter_truncation_artifacts); deterministische
+# Issues bleiben ohnehin ausgenommen. Wortgrenzen: Lookbehind verbietet
+# Zusammensetzungen wie "Abkürzung"/"Verkürzung" — die können legitimerweise
+# in einer Evidenz stehen ("Abkürzung gem. DIN 4719") und würden ein echtes
+# Issue fälschlich unterdrücken. "abgekürzt" darf weiter matchen (gehört
+# semantisch zur Kürzungs-Familie), deshalb optionales `ab`-Präfix NACH
+# dem Lookbehind. Input ist bereits casefolded, daher genügt die
+# Kleinschreibung im Lookbehind.
+TRUNCATION_WORD_PATTERN = re.compile(
+    r"(?<![a-zäöüß])(?:ab)?gek(?:ü|ue)rzt"
+    r"|(?<![a-zäöüß])k(?:ü|ue)rzung(?:en)?\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def references_truncation(issue: dict) -> bool:
+    """True, wenn evidence-/fix_hint-Text des Issues auf die Quellen-Kürzung
+    verweist (casefold, Unicode-fest — analog has_self_contradiction).
+    Match über wörtliche Marker ODER Wortfamilie (Regex, s. Kommentar).
+    claim_in_page wird bewusst NICHT geprüft."""
+    text = " ".join(str(issue.get(k) or "") for k in ("evidence", "fix_hint"))
+    low = text.casefold()
+    return (any(marker in low for marker in TRUNCATION_EVIDENCE_MARKERS)
+            or TRUNCATION_WORD_PATTERN.search(low) is not None)
+
+
+def filter_truncation_artifacts(issues: list[dict]
+                                ) -> tuple[list[dict], list[str]]:
+    """Teilt LLM-Issues in (beibehalten, unterdrückt) wegen Kürzungs-Artefakten.
+
+    Unterdrückt wird nur, was ALLE drei Kriterien erfüllt (Änderung A):
+      * origin == 'llm' (deterministische Issues sind echte Befunde)
+      * severity == 'contradiction'
+      * evidence-/fix_hint verweist auf die Quellen-Kürzung
+    Returns: (kept_issues, [claim_in_page der unterdrückten Issues]).
+    """
+    kept: list[dict] = []
+    dropped_claims: list[str] = []
+    for iss in issues:
+        if (isinstance(iss, dict)
+                and iss.get("origin") == "llm"
+                and str(iss.get("severity") or "").strip().lower() == "contradiction"
+                and references_truncation(iss)):
+            dropped_claims.append(str(iss.get("claim_in_page", "")))
+        else:
+            kept.append(iss)
+    return kept, dropped_claims
+
+
 def _scan_balanced_json(text: str, start: int) -> int | None:
     """Scanne ab text[start] == '{' bis der Klammer-Ausgleich erreicht ist.
 
@@ -683,11 +749,17 @@ def _trim_source(text: str) -> str:
     """Quellen-Text: <30KB komplett, sonst Kopf 10KB + Mitte 10KB + Ende 10KB."""
     if len(text) <= SOURCE_FULL_MAX:
         return text
-    hint = "\n\n[Hinweis: Quelle gekürzt — Tabellen wurden separat deterministisch geprüft.]\n\n"
+    hint = f"\n\n[Hinweis: {TRUNCATION_MARKER}.]\n\n"
     head = text[:SOURCE_PART]
     mid = text[len(text) // 2 - SOURCE_PART // 2: len(text) // 2 + SOURCE_PART // 2]
     tail = text[-SOURCE_PART:]
     return f"{head}\n\n[...]\n\n{mid}\n\n[...]\n\n{tail}{hint}"
+
+
+def sources_truncated(source_texts: list[str]) -> bool:
+    """True, wenn mindestens eine Quelle > SOURCE_FULL_MAX ist und somit im
+    User-Prompt gekürzt wird (Mittelteil fehlt dem LLM)."""
+    return any(len(t) > SOURCE_FULL_MAX for t in source_texts)
 
 
 def load_system_prompt() -> str:
@@ -729,6 +801,19 @@ def build_llm_user_prompt(page_name: str, page_body: str,
         'Paraphrase, keine Ergänzung). Wenn die Korrektur NICHT exakt aus '
         'der Quell-Evidenz belegt ist oder du unsicher bist: "fix": null '
         "(das ist dann die einzig korrekte Antwort).")
+    if sources_truncated(source_texts):
+        parts.append(
+            "\n## Hinweis zur Quellen-Kürzung\n"
+            f"Mindestens eine Quelle ist gekürzt (Marker: \"{TRUNCATION_MARKER}\").\n"
+            "VERBOT: Issues deren Belegstelle im abgeschnittenen Mittelteil "
+            "der Quelle liegen KÖNNTE, sind NICHT zu listen — weder als "
+            "contradiction noch als Eintrag mit anderer severity. "
+            "Wenn unklar ist, ob die Belegstelle im sichtbaren Quellenteil "
+            "steht: Issue komplett weglassen (nicht mit Disclaimer "
+            "melden) — für den Tabellen-Abgleich ist ausschließlich der "
+            "deterministische Prüfpfad zuständig. Melde ausschließlich "
+            "Widersprüche, die eindeutig innerhalb des sichtbaren "
+            "Quellenteils belegt sind.")
     if det_issues:
         hints = [i for i in det_issues
                  if i.get("origin") == "deterministic"
@@ -822,6 +907,7 @@ def check_page(page: Path, *, sources_root: Path,
 
     checked_claims = len(issues)
     filtered_self_contradictions: list[str] = []
+    suppressed_truncation = 0  # Änderung A: Zähler unterdrückter LLM-Issues
     llm_raw_text: str | None = None
     llm_grund: str = ""
     if not missing:
@@ -857,6 +943,13 @@ def check_page(page: Path, *, sources_root: Path,
         else:
             kept_issues, filtered_self_contradictions = filter_self_contradictions(
                 llm_result.get("issues") or [])
+            # Änderung A: Kürzungs-Artefakte aussortieren (nur origin=llm,
+            # severity=contradiction, Evidenz verweist auf die Kürzung).
+            kept_issues = [dict(iss, origin="llm") for iss in kept_issues
+                           if isinstance(iss, dict)]
+            kept_issues, suppressed_truncation_claims = \
+                filter_truncation_artifacts(kept_issues)
+            suppressed_truncation = len(suppressed_truncation_claims)
             for iss in kept_issues:
                 if not isinstance(iss, dict):
                     continue  # LLM liefert manchmal Strings/Ints — verworfen
@@ -865,9 +958,9 @@ def check_page(page: Path, *, sources_root: Path,
                 issues.append(iss)
             if isinstance(llm_result.get("checked_claims"), int):
                 checked_claims = llm_result["checked_claims"]
-            # Status-Upgrade nur, wenn nach dem Self-contradiction-Filter
-            # noch LLM-Issues übrig sind (sonst bliebe die Page trotz leerer
-            # Issues-Liste bei 'issues').
+            # Status-Upgrade nur, wenn nach Self-contradiction- UND
+            # Kürzungs-Filter noch LLM-Issues übrig sind (sonst bliebe die
+            # Page trotz leerer Issues-Liste bei 'issues').
             kept_llm = sum(1 for i in issues if i.get("origin") == "llm")
             if (llm_result.get("status") == "issues" and status == "clean"
                     and kept_llm > 0):
@@ -883,6 +976,7 @@ def check_page(page: Path, *, sources_root: Path,
         "checked_claims": checked_claims,
         "issues": issues,
         "filtered_self_contradictions": filtered_self_contradictions,
+        "suppressed_truncation": suppressed_truncation,
         "llm_model": _llm_model_name(),
         "duration_sec": round(time.time() - started, 2),
     }
@@ -941,6 +1035,57 @@ def _page_age_days(fm: dict, today) -> int | None:
 
 
 RECHECK_DAYS = 30  # clean/patched Pages werden 30 Tage lang nicht erneut geprüft
+# Änderung B: Seiten deren Issues unpatchbar sind (alle fix=null), bekommen
+# nach ISSUE_BACKOFF_ROUNDS aufeinanderfolgenden Runden mit identischem
+# Issue-Fingerprint Schonfrist bis issue_until (analog RECHECK_DAYS).
+ISSUE_BACKOFF_ROUNDS = 2
+
+
+def issue_fingerprint(issues: list[dict], body: str = "") -> str:
+    """Stabiler Fingerprint über die claim_in_page-Menge der Issues (+ Body).
+
+    Claims sortiert + dedupliziert → identische Issue-Menge ergibt denselben
+    Hash (unabhängig von Reihenfolge/Duplikaten). Optional wird der Body
+    mitgehasht: ändert sich die Seite, gilt der Fingerprint als anders →
+    Zähler-Reset (Änderung B: 'sofern sich der Seiteninhalt nicht geändert
+    hat'). Leere Issues ohne Body → leerer String."""
+    claims = sorted({str(i.get("claim_in_page", ""))
+                     for i in issues if isinstance(i, dict)})
+    joined = "\n".join(claims)
+    if not joined and not body:
+        return ""
+    payload = joined + ("\0" + body if body else "")
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def backoff_state(*, fm: dict, status: str, fingerprint: str,
+                  applied: int, today=None) -> dict:
+    """Backoff-Zustand für das Frontmatter (Änderung B).
+
+    Regeln:
+      * status == 'issues' und applied == 0 (kein Fix angewandt):
+          identischer Fingerprint wie zuletzt → runden + 1;
+          anderer Fingerprint (Seite geändert) → runden zurück auf 1.
+          Bei runden >= ISSUE_BACKOFF_ROUNDS: issue_until = today + RECHECK_DAYS.
+      * sonst (clean/patched/error/patch angewandt): zurücksetzen (0, leer).
+    Returns {"runden": int, "fingerprint": str, "until": str} — bis auf
+    'runden' leere Strings wenn kein Backoff aktiv.
+    """
+    from datetime import date, timedelta
+    if today is None:
+        today = date.today()
+    try:
+        prev_rounds = int(str(fm.get("issue_runden") or "0").strip() or "0")
+    except ValueError:
+        prev_rounds = 0
+    prev_fp = str(fm.get("issue_fingerprint") or "").strip()
+    if status == "issues" and applied == 0:
+        rounds = prev_rounds + 1 if fingerprint and fingerprint == prev_fp else 1
+        state = {"runden": rounds, "fingerprint": fingerprint, "until": ""}
+        if rounds >= ISSUE_BACKOFF_ROUNDS:
+            state["until"] = (today + timedelta(days=RECHECK_DAYS)).isoformat()
+        return state
+    return {"runden": 0, "fingerprint": "", "until": ""}
 
 
 def _iso_date(value) -> "date | None":
@@ -967,6 +1112,8 @@ def select_candidates(candidates: list[dict], n: int, today=None) -> list[dict]:
       1. Aufsteigend nach Frontmatter `updated` (Tiebreaker `created`);
          fehlende Daten sortieren ans Ende.
       2. Ausgeschlossen: check_status clean|patched UND last_check ≤ 30 Tage.
+         2b. Ausgeschlossen: issue_until in der Zukunft (Schonfrist für
+         unpatchbare Issues nach 2 identischen Runden, Änderung B).
       3. Rollup-Regel (einfache robuste Variante, dokumentiert): eine Page mit
          rollup_hash wird in diesem Lauf ausgeschlossen, solange im selben
          Scope-Ordner eine NICHT-Rollup-Page mit updated ≤ Rollup-updated
@@ -987,6 +1134,7 @@ def select_candidates(candidates: list[dict], n: int, today=None) -> list[dict]:
             "created": _iso_date(fm.get("created")),
             "last_check": _iso_date(fm.get("last_check")),
             "status": str(fm.get("check_status") or "").strip(),
+            "issue_until": _iso_date(fm.get("issue_until")),
             "is_rollup": bool(fm.get("rollup_hash")),
             "scope": _candidate_scope(c),
         })
@@ -998,7 +1146,12 @@ def select_candidates(candidates: list[dict], n: int, today=None) -> list[dict]:
             return False
         return (today - d["last_check"]).days <= RECHECK_DAYS
 
-    eligible = [d for d in dated if not fresh_checked(d)]
+    def in_issue_grace(d) -> bool:
+        """Schonfrist aus Änderung B: issue_until liegt in der Zukunft."""
+        return d["issue_until"] is not None and d["issue_until"] >= today
+
+    eligible = [d for d in dated
+                if not fresh_checked(d) and not in_issue_grace(d)]
     blocked = set()
     for d in eligible:
         if not d["is_rollup"] or d["updated"] is None:
@@ -1065,9 +1218,14 @@ def _git(repo_root: Path, *args: str) -> tuple[int, str]:
 
 
 def update_frontmatter(page: Path, *, today, model: str, status: str,
-                       repo_root: Path, kind: str = "check") -> dict:
+                       repo_root: Path, kind: str = "check",
+                       backoff: dict | None = None) -> dict:
     """Aktualisiert die drei Check-Felder im Frontmatter (Body bleibt
     byte-stabil) und committed die Page.
+
+    backoff: optional {"runden": int, "fingerprint": str, "until": str} —
+    schreibt zusätzlich issue_runden/issue_fingerprint/issue_until (Änderung B).
+    Ohne backoff-Argument bleiben bestehende Backoff-Felder unangetastet.
 
     Git-Schutz: VOR der Änderung `git status --porcelain` — bei Dirty-State
     wird NICHT committet (außer die einzige Änderung ist die Page selbst;
@@ -1090,11 +1248,20 @@ def update_frontmatter(page: Path, *, today, model: str, status: str,
     # sonst würde 'last_check:' auch die model-Zeile matchen). Closing '---'
     # vom Block trennen, sonst landen die neuen Felder IM Body.
     inner = m.group(1).split("\n")[1:-2]  # ohne '---', '---' + trailing ''
-    block = [ln for ln in inner
-             if not re.match(r"^(last_check: |last_check_model: |check_status: )", ln)]
+    keep_re = (r"^(last_check: |last_check_model: |check_status: )"
+               if backoff is None else
+               r"^(last_check: |last_check_model: |check_status: "
+               r"|issue_fingerprint: |issue_runden: |issue_until: )")
+    block = [ln for ln in inner if not re.match(keep_re, ln)]
     block += [f"last_check: {today.isoformat()}",
               f"last_check_model: {model}",
               f"check_status: {status}"]
+    if backoff is not None:
+        # Fingerabdruck quoted — leerer Wert wäre ohne Quotes ein YAML-Block
+        block += [f"issue_fingerprint: \"{backoff.get('fingerprint', '')}\"",
+                  f"issue_runden: {int(backoff.get('runden', 0) or 0)}"]
+        if backoff.get("until"):
+            block.append(f"issue_until: {backoff['until']}")
     new_text = "---\n" + "\n".join(block) + "\n---\n" + m.group(2)
     page.write_text(new_text, encoding="utf-8")
 
@@ -1246,9 +1413,16 @@ def qc_process_page(page: Path, *, sources_root: Path, output_dir: Path,
     + check_status 'patched' + Commit 'patch'. Ohne gültigen Patch: nur ein
     'check'-Commit mit dem finalen Status (clean|issues|...).
 
+    Änderung B (Backoff): bei Status 'issues' ohne angewandten Fix wird der
+    Issue-Fingerprint (Hash über die claim_in_page-Menge) im Frontmatter
+    geführt (issue_fingerprint/issue_runden/issue_until). Nach 2 Runden mit
+    identischem Fingerprint greift Schonfrist bis issue_until; bei geänderter
+    Seite (anderer Fingerprint) setzt der Zähler zurück.
+
     Liefert das check_page-Result + Zusatzfelder 'frontmatter', 'patch'
     ({patched: bool, applied: int, skipped: [claim_in_page mit Grund]}),
-    'qc_status' (Frontmatter-Status). --all bleibt read-only (kompatibel).
+    'qc_status' (Frontmatter-Status), 'backoff'. --all bleibt read-only
+    (kompatibel).
     """
     from datetime import date
     page = Path(page)
@@ -1271,22 +1445,32 @@ def qc_process_page(page: Path, *, sources_root: Path, output_dir: Path,
                   file=sys.stderr)
     else:
         # 1) Check-Ergebnis committen: Frontmatter 'issues', Body UNVERÄNDERT
+        #    (Backoff hier zurücksetzen — die Seite wird ja gepatcht)
+        reset = {"runden": 0, "fingerprint": "", "until": ""}
         update_frontmatter(page, today=date.today(), model=model,
-                           status="issues", repo_root=repo_root, kind="check")
+                           status="issues", repo_root=repo_root, kind="check",
+                           backoff=reset)
         # 2) Body-Patch anwenden + Frontmatter 'patched' → Commit 'patch'
         text = page.read_text(encoding="utf-8")
         _fm2, body2 = parse_frontmatter(text)
         page.write_text(text.replace(body2, new_body, 1), encoding="utf-8")
         fm_result = update_frontmatter(page, today=date.today(), model=model,
                                        status="patched", repo_root=repo_root,
-                                       kind="patch")
+                                       kind="patch", backoff=reset)
         qc_status = "patched"
+        backoff = reset
     if not patched:
+        # Änderung B: Backoff-Zustand für unpatchbare Issues ermitteln
+        backoff = backoff_state(
+            fm=_fm, status=qc_status,
+            fingerprint=issue_fingerprint(result.get("issues") or [], body),
+            applied=0, today=date.today())
         fm_result = update_frontmatter(page, today=date.today(), model=model,
                                        status=qc_status, repo_root=repo_root,
-                                       kind="check")
+                                       kind="check", backoff=backoff)
     result["qc_status"] = qc_status
     result["frontmatter"] = fm_result
+    result["backoff"] = backoff
     result["patch"] = {"patched": patched,
                        "applied": len(valid_fixes) if patched else 0,
                        "skipped": skipped}

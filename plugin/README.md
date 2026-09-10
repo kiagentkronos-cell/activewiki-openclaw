@@ -125,8 +125,10 @@ activewiki/
 **`check.py` — Nightly Quality Check:**
 - Verifies the oldest wiki pages against their full-text sources (deterministic table diff + LLM prose check in one call)
 - Inline auto-patch for fixes exactly evidenced by sources (exact-once-occurrence rule), self-contradiction filter, OCR-decimal normalization
+- Truncation-artifact filter: LLM contradictions referencing a trimmed source are suppressed (prompt prohibition + deterministic word-family filter); `suppressed_truncation` counter in the report
+- Unpatchable-issue backoff: after 2 identical rounds (issue fingerprint over claims + body) pages get a 30-day grace period (`issue_fingerprint` / `issue_runden` / `issue_until` frontmatter) instead of endless re-checks
 - Frontmatter tracking (`check_status` / `last_check` / `last_check_model`) + 2-commit pattern (check + patch)
-- JSON reports under `<wikis_root>/quality/results/`; 86 unit tests in `test_check.py`
+- JSON reports under `<wikis_root>/quality/results/`; 121 unit tests in `test_check.py`
 
 **`run_inbox.sh` — Master Pipeline:**
 - Coordinates all phases: Ingest → Distill → Auto-commit → Quality Check → Vectordb → Graph HTML

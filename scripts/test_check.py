@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1592,6 +1593,314 @@ class TestParseLLMAnswerHardened(unittest.TestCase):
             self.assertEqual(result["status"], "error")
             hint = json.dumps(result["issues"], ensure_ascii=False)
             self.assertIn("abgeschnitten", hint)
+
+
+# ── 16. Änderung A: Kürzungs-Artefakte unterdrücken ────────────────────────
+
+TRUNC_EVIDENCE = ("Die Aussage koennte im abgeschnittenen Mittelteil belegt "
+                  "sein — Quelle gekürzt, Tabellen wurden separat deterministisch geprueft.")
+
+
+def trunc_issue(**over) -> dict:
+    iss = {"severity": "contradiction", "claim_in_page": "Heizung 2021",
+           "source_ref": "aaaa11112222-Testquelle",
+           "evidence": TRUNC_EVIDENCE, "fix_hint": None, "fix": None}
+    iss.update(over)
+    return iss
+
+
+class TestTruncationFilter(unittest.TestCase):
+    def test_filter_drops_only_llm_contradiction_with_marker(self):
+        """Nur origin=llm + severity=contradiction + Kürzungs-Marker → weg;
+        andere Origins/Severities/Evidenzen bleiben erhalten."""
+        issues = [
+            dict(trunc_issue(claim_in_page="A"), origin="llm"),
+            dict(trunc_issue(claim_in_page="B"), origin="deterministic"),
+            dict(trunc_issue(claim_in_page="C", severity="unbelegt"),
+                 origin="llm"),
+            {"severity": "contradiction", "claim_in_page": "D",
+             "source_ref": "s", "evidence": "Quelle sagt 1051572",
+             "fix_hint": None, "origin": "llm"},
+        ]
+        kept, dropped = check.filter_truncation_artifacts(issues)
+        self.assertEqual([i["claim_in_page"] for i in kept], ["B", "C", "D"])
+        self.assertEqual(dropped, ["A"])
+
+    def test_check_page_suppresses_and_counts(self):
+        """E2E: synthetisches contradiction-Issue mit Kürzungs-Evidenz
+        verschwindet aus issues und taucht im Zähler suppressed_truncation auf."""
+        payload = json.dumps({"page": "testpage", "status": "issues",
+                              "checked_claims": 4,
+                              "issues": [trunc_issue(),
+                                         trunc_issue(claim_in_page="Heizung 2041")]},
+                             ensure_ascii=False)
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ctx = make_fake_wiki(tmp)
+            result = check.check_page(
+                ctx["page"], sources_root=tmp / "sources",
+                output_dir=None, llm_call=mock_llm(payload))
+            self.assertEqual(result["suppressed_truncation"], 2)
+            self.assertEqual([i for i in result["issues"]
+                              if i.get("origin") == "llm"], [])
+            # Nur noch saubere LLM-Issues → Status darf nicht 'issues' sein
+            # (deterministischer Table-Diff ist hier clean)
+            self.assertEqual(result["status"], "clean")
+
+    def test_report_always_has_suppressed_field(self):
+        """JSON-Report enthält immer 'suppressed_truncation' (0 bei sauberem Lauf)."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ctx = make_fake_wiki(tmp)
+            result = check.check_page(
+                ctx["page"], sources_root=tmp / "sources",
+                output_dir=None, llm_call=mock_llm(LLM_CLEAN))
+            self.assertEqual(result["suppressed_truncation"], 0)
+
+    def test_prompt_has_truncation_rule_for_big_sources(self):
+        """Prompt-Regie: bei gekürzter Quelle (> SOURCE_FULL_MAX) enthält der
+        User-Prompt den Kürzungs-Hinweis; bei kleiner Quelle nicht."""
+        big = "Wort " * (check.SOURCE_FULL_MAX // 5 + 100)
+        prompt_big = check.build_llm_user_prompt(
+            "testpage", "## Seite\n\nText.\n", [big], ["src"], None)
+        self.assertIn("Quelle gekürzt", prompt_big)
+        self.assertIn("deterministisch", prompt_big)
+        prompt_small = check.build_llm_user_prompt(
+            "testpage", "## Seite\n\nText.\n", ["klein"], ["src"], None)
+        self.assertNotIn("Hinweis zur Quellen-Kürzung", prompt_small)
+
+    def test_prompt_truncation_rule_is_prohibition(self):
+        """Prompt-Abschnitt ist als VERBOT formuliert (nicht als Empfehlung) —
+        Verbot + Ungewissheitsregel."""
+        big = "Wort " * (check.SOURCE_FULL_MAX // 5 + 100)
+        prompt = check.build_llm_user_prompt(
+            "testpage", "## Seite\n\nText.\n", [big], ["src"], None)
+        self.assertIn("VERBOT", prompt)
+        self.assertIn("NICHT zu listen", prompt)
+        self.assertIn("abgeschnitten", prompt)
+        self.assertIn("weglassen", prompt)
+
+    def test_paraphrase_gekuerzter_auszug_suppressed(self):
+        """Umschreibung 'gekürzten Auszug' wird unterdrückt."""
+        iss = trunc_issue(
+            evidence="Der Abschnitt 9.4 in der Quelle ist im gekürzten "
+                     "Auszug NICHT enthalten.", origin="llm")
+        kept, dropped = check.filter_truncation_artifacts([iss])
+        self.assertEqual(kept, [])
+        self.assertEqual(dropped, [iss["claim_in_page"]])
+
+    def test_paraphrase_gekuerzter_quellenauszug_suppressed(self):
+        """Umschreibung 'gekürzten Quellenauszug' wird unterdrückt."""
+        iss = trunc_issue(
+            evidence="Abschnitt 1.7.2 ist im gekürzten Quellenauszug "
+                     "nicht als Text enthalten.", origin="llm")
+        kept, dropped = check.filter_truncation_artifacts([iss])
+        self.assertEqual(kept, [])
+
+    def test_paraphrase_gekuerzter_teil_suppressed(self):
+        """Umschreibung 'gekürzten Teil' wird unterdrückt."""
+        iss = trunc_issue(
+            evidence="Da sie im gekürzten Teil liegen könnten, "
+                     "ist ein Widerspruch möglich.", origin="llm")
+        kept, dropped = check.filter_truncation_artifacts([iss])
+        self.assertEqual(kept, [])
+
+    def test_real_contradiction_without_truncation_survives(self):
+        """Negativ-Fall: echtes contradiction-Issue OHNE Kürzungs-Bezug bleibt."""
+        iss = trunc_issue(
+            evidence="Page nennt 19 kW, die Quelle nennt im sichtbaren "
+                     "Abschnitt 1051572 kW für dieselbe Anlage.",
+            fix_hint=None, origin="llm")
+        kept, dropped = check.filter_truncation_artifacts([iss])
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(dropped, [])
+
+    def test_deterministic_issue_with_truncation_word_survives(self):
+        """Deterministisches Issue bleibt auch mit Kürzungs-Wort immer erhalten."""
+        iss = trunc_issue(
+            evidence="Wert fehlt in der Tabelle — Quelle gekürzt.",
+            origin="deterministic")
+        kept, dropped = check.filter_truncation_artifacts([iss])
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(dropped, [])
+
+    def test_abkuerzung_evidence_survives(self):
+        """'Abkürzung' (z.B. DIN-Hinweis) ist kein Kürzungs-Artefakt —
+        echtes Issue OHNE Quellen-Kürzungs-Bezug bleibt."""
+        iss = trunc_issue(
+            evidence="Die Abkürzung gem. DIN 4719 ist in Page und Quelle "
+                     "identisch, aber die Maßangabe 1051572 widerspricht "
+                     "dem sichtbaren Abschnitt.",
+            origin="llm")
+        kept, dropped = check.filter_truncation_artifacts([iss])
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(dropped, [])
+        # Und der Kern-Filter selbst: reines 'Abkürzung' matcht nicht ...
+        self.assertFalse(check.references_truncation(
+            {"evidence": "Abkürzung gem. DIN 4719", "fix_hint": None}))
+        # ... 'Verkürzung' ebenfalls nicht, 'abgekürzt' dagegen schon.
+        self.assertFalse(check.references_truncation(
+            {"evidence": "Die Verkürzung des Titels", "fix_hint": None}))
+        self.assertTrue(check.references_truncation(
+            {"evidence": "in der Quelle abgekürzt dargestellt",
+             "fix_hint": None}))
+
+
+# ── 17. Änderung B: Backoff für unpatchbare Issues ─────────────────────────
+
+class TestIssueBackoff(unittest.TestCase):
+    def test_fingerprint_stable_and_order_independent(self):
+        a = check.issue_fingerprint([{"claim_in_page": "x"}, {"claim_in_page": "y"}])
+        b = check.issue_fingerprint([{"claim_in_page": "y"}, {"claim_in_page": "x"}])
+        c = check.issue_fingerprint([{"claim_in_page": "x"}])
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, c)
+        self.assertEqual(check.issue_fingerprint([]), "")
+
+    def test_backoff_state_rounds_and_grace(self):
+        today = date(2026, 9, 8)
+        s0 = check.backoff_state(fm={}, status="issues", fingerprint="ab12",
+                                 applied=0, today=today)
+        self.assertEqual(s0["runden"], 1)
+        self.assertEqual(s0["until"], "")
+        s1 = check.backoff_state(fm={"issue_fingerprint": "ab12", "issue_runden": "1"},
+                                 status="issues", fingerprint="ab12",
+                                 applied=0, today=today)
+        self.assertEqual(s1["runden"], 2)
+        self.assertEqual(s1["until"], (today + timedelta(days=check.RECHECK_DAYS)).isoformat())
+        # anderer Fingerprint → Zähler zurück auf 1, keine Schonfrist
+        s2 = check.backoff_state(fm={"issue_fingerprint": "ab12", "issue_runden": "1"},
+                                 status="issues", fingerprint="cd34",
+                                 applied=0, today=today)
+        self.assertEqual(s2["runden"], 1)
+        self.assertEqual(s2["until"], "")
+        # Fix angewandt → Reset
+        s3 = check.backoff_state(fm={"issue_fingerprint": "ab12", "issue_runden": "1"},
+                                 status="issues", fingerprint="ab12",
+                                 applied=1, today=today)
+        self.assertEqual(s3, {"runden": 0, "fingerprint": "", "until": ""})
+        # clean → Reset
+        s4 = check.backoff_state(fm={"issue_fingerprint": "ab12", "issue_runden": "2"},
+                                 status="clean", fingerprint="",
+                                 applied=0, today=today)
+        self.assertEqual(s4, {"runden": 0, "fingerprint": "", "until": ""})
+
+    def test_select_excludes_active_grace(self):
+        """issue_until in der Zukunft → ausgeschlossen; abgelaufen → wählbar."""
+        today = date(2026, 9, 8)
+        cands = [
+            {"path": "grace.md", "fm": {"check_status": "issues",
+                                        "issue_until": str(today),
+                                        "updated": "2026-01-01"}},
+            {"path": "expired.md", "fm": {"check_status": "issues",
+                                          "issue_until": "2026-01-01",
+                                          "updated": "2026-01-02"}},
+        ]
+        picked = check.select_candidates(cands, n=2, today=today)
+        names = [str(c["path"]) for c in picked]
+        self.assertNotIn("grace.md", names)
+        self.assertIn("expired.md", names)
+
+    def test_update_frontmatter_writes_and_clears_backoff_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ctx = make_fake_wiki(tmp)  # kein Git-Repo
+            page = ctx["page"]
+            r = check.update_frontmatter(
+                page, today=date(2026, 9, 8), model="m", status="issues",
+                repo_root=tmp,
+                backoff={"runden": 2, "fingerprint": "ab12", "until": "2026-10-08"})
+            self.assertTrue(r["updated"], r)
+            text = page.read_text(encoding="utf-8")
+            self.assertIn('issue_fingerprint: "ab12"', text)
+            self.assertIn("issue_runden: 2", text)
+            self.assertIn("issue_until: 2026-10-08", text)
+            # Erneuter Update ohne backoff-Argument: alte Felder bleiben unangetastet
+            check.update_frontmatter(page, today=date(2026, 9, 9), model="m",
+                                     status="issues", repo_root=tmp)
+            text = page.read_text(encoding="utf-8")
+            self.assertEqual(text.count("issue_runden:"), 1)
+            # Update mit Reset → keine Duplikate, until verschwindet
+            check.update_frontmatter(
+                page, today=date(2026, 9, 10), model="m", status="clean",
+                repo_root=tmp, backoff={"runden": 0, "fingerprint": "", "until": ""})
+            text = page.read_text(encoding="utf-8")
+            self.assertEqual(text.count("issue_runden:"), 1)
+            self.assertEqual(text.count("issue_fingerprint:"), 1)
+            self.assertNotIn("issue_until: 2026-10-08", text)
+
+
+BACKOFF_ISSUES = [{"severity": "contradiction", "claim_in_page": "Heizung 2021",
+                   "source_ref": "s", "evidence": "Quelle sagt was anderes",
+                   "fix_hint": None, "fix": None}]
+
+
+class TestIssueBackoffE2E(unittest.TestCase):
+    """E2E über qc_process_page: identische Runden → Schonfrist; geänderter
+    Inhalt → Zähler zurück."""
+
+    def _fm_of(self, page: Path) -> dict:
+        fm, _ = check.parse_frontmatter(page.read_text(encoding="utf-8"))
+        return fm
+
+    def _candidate(self, page: Path, today) -> bool:
+        """Ist die Page laut select_candidates wählbar?"""
+        fm = self._fm_of(page)
+        picked = check.select_candidates([{"path": page, "fm": fm}], n=1, today=today)
+        return any(str(c["path"]) == str(page) for c in picked)
+
+    def test_two_identical_rounds_then_grace(self):
+        payload = llm_issues_payload(BACKOFF_ISSUES)
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ctx = make_fake_wiki(tmp)
+            page = ctx["page"]
+            r1 = run_qc(tmp, ctx, payload)
+            self.assertEqual(r1["qc_status"], "issues")
+            self.assertEqual(r1["backoff"]["runden"], 1)
+            self.assertEqual(r1["backoff"]["until"], "")
+            self.assertTrue(self._candidate(page, date.today()),
+                            "nach Runde 1 noch wählbar")
+            r2 = run_qc(tmp, ctx, payload)
+            self.assertEqual(r2["backoff"]["runden"], 2)
+            self.assertNotEqual(r2["backoff"]["until"], "")
+            self.assertFalse(self._candidate(page, date.today()),
+                             "nach Runde 2 mit Schonfrist nicht mehr wählbar")
+            # Frontmatter-Felder vorhanden
+            fm = self._fm_of(page)
+            self.assertEqual(fm["issue_runden"], "2")
+            self.assertEqual(fm["issue_fingerprint"], r2["backoff"]["fingerprint"])
+
+    def test_changed_content_resets_rounds(self):
+        payload = llm_issues_payload(BACKOFF_ISSUES)
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ctx = make_fake_wiki(tmp)
+            page = ctx["page"]
+            run_qc(tmp, ctx, payload)
+            # Seiteninhalt ändern → anderer Fingerprint → Zähler zurück
+            text = page.read_text(encoding="utf-8")
+            page.write_text(text + "\nNeuer Absatz mit neuer Behauptung.\n",
+                            encoding="utf-8")
+            r2 = run_qc(tmp, ctx, payload)
+            self.assertEqual(r2["backoff"]["runden"], 1)
+            self.assertEqual(r2["backoff"]["until"], "")
+            self.assertTrue(self._candidate(page, date.today()))
+
+    def test_patched_page_resets_backoff(self):
+        payload = llm_issues_payload([patch_issue({
+            "original": "Kundennummer 1051574",
+            "corrected": "Kundennummer 1051572"})])
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ctx = make_fake_wiki(tmp, page_body=PATCH_BODY)
+            page = ctx["page"]
+            r = run_qc(tmp, ctx, payload)
+            self.assertEqual(r["qc_status"], "patched")
+            self.assertEqual(r["backoff"], {"runden": 0, "fingerprint": "",
+                                            "until": ""})
+            fm = self._fm_of(page)
+            self.assertEqual(fm.get("issue_runden"), "0")
 
 
 if __name__ == "__main__":

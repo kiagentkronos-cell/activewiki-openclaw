@@ -5,6 +5,44 @@ All notable changes to the ActiveWiki project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.5] - 2026-09-10
+
+### Added
+- **Truncation-artifact filter** in the nightly quality check
+  (`scripts/check.py`): sources above `SOURCE_FULL_MAX` (30 KB) are trimmed
+  for the LLM prompt (head + middle excerpt + tail); the LLM used to report
+  contradictions whose evidence might simply sit in the cut-out middle. The
+  user prompt now carries an explicit prohibition (`VERBOT`) for exactly that
+  case, and a deterministic post-filter
+  (`filter_truncation_artifacts()`) discards any remaining LLM issue with
+  `origin: llm` + `severity: contradiction` whose evidence/fix_hint
+  references the truncation. Matching covers the literal markers plus the
+  word family `gekürzt`/`gekuerzt`/`Kürzung`/`Kuerzung` via regex with
+  word-boundary lookbehind (`Abkürzung`/`Verkürzung` never trigger — they
+  can legitimately appear in evidence; `abgekürzt` still matches).
+  Deterministic issues and other severities are never suppressed.
+  Suppressed issues are counted in the new report field
+  `suppressed_truncation`.
+- **Unpatchable-issue backoff**: pages whose issues never yield an applied
+  fix (all `fix: null`) were re-checked every night forever. After 2
+  consecutive rounds with an identical issue fingerprint
+  (`issue_fingerprint()` — SHA-256 over the sorted `claim_in_page` set plus
+  page body, order- and duplicate-independent), the page now gets a 30-day
+  grace period until `issue_until` (analog `RECHECK_DAYS`) and is excluded
+  from candidate selection. Any content change (different fingerprint) or
+  applied patch resets the counter. New frontmatter fields:
+  `issue_fingerprint`, `issue_runden`, `issue_until`; `qc_process_page()`
+  returns the state as `backoff`.
+
+### Tests
+- 18 new tests in `test_check.py` (121 total): filter triage (origin/
+  severity/marker matrix), paraphrase cases, word-boundary negatives
+  (`Abkürzung`/`Verkürzung` survive, `abgekürzt` matches), prompt
+  prohibition assertions, fingerprint stability, `backoff_state()` round
+  arithmetic, grace-period exclusion in `select_candidates()`,
+  frontmatter write/reset, and E2E two-rounds-then-grace over
+  `qc_process_page()` (mocks only, no real LLM).
+
 ## [1.1.4] - 2026-09-07
 
 ### Added
