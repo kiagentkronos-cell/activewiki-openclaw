@@ -6077,6 +6077,171 @@ def _hitl_notify(rule):
         log("warn", f"HITL notification error: {e}")
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  Status / Health Check
+# ═══════════════════════════════════════════════════════════════════
+
+def cmd_status(as_json: bool = False) -> int:
+    """Health snapshot: one line per factor, each isolated in try/except.
+
+    Never raises for a single failing factor — a broken check degrades to a
+    warn/fail line. Exit code 1 only when the index database itself is
+    unusable; everything else (warnings included) exits 0.
+    """
+    import urllib.error
+
+    checks: list[dict] = []
+
+    def add(name: str, level: str, detail: str) -> None:
+        # level: "ok" | "warn" | "fail" (fail = hard breakage of the DB itself)
+        checks.append({"name": name, "level": level, "detail": detail})
+
+    # ── 1. Database file ──
+    db_ok = True
+    conn = None
+    try:
+        size_mb = DB_PATH.stat().st_size / 1e6
+        add("database", "ok", f"{DB_PATH} ({size_mb:.1f} MB)")
+        try:
+            conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True,
+                                   timeout=5)
+            row = conn.execute("PRAGMA quick_check").fetchone()
+            if row and row[0] == "ok":
+                add("integrity", "ok", "quick_check ok")
+            else:
+                add("integrity", "fail", f"quick_check: {row[0] if row else '?'}")
+                db_ok = False
+        except Exception as exc:
+            add("integrity", "fail", f"cannot open/verify: {exc}")
+            db_ok = False
+    except FileNotFoundError:
+        # Not built yet is a warning, not a broken system (exit stays 0).
+        add("database", "warn", f"{DB_PATH}: not built yet (run `build`)")
+    except Exception as exc:
+        add("database", "fail", f"{DB_PATH}: {exc}")
+        db_ok = False
+
+    # ── 2. Table counts (fresh DB without graph tables must not crash) ──
+    for table, label in (("chunks", "chunks"), ("entities", "graph entities"),
+                         ("relationships", "graph relationships")):
+        try:
+            if conn is None:
+                raise RuntimeError("database unavailable")
+            n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            add(label, "ok", f"{n} rows")
+        except Exception as exc:
+            add(label, "warn", f"not readable/built: {exc}")
+
+    # ── 3. Inbox backlog ──
+    try:
+        inbox = _WIKIS_ROOT / "inbox"
+        files = list(inbox.rglob("*.md")) if inbox.is_dir() else []
+        if not files:
+            add("inbox", "ok", "empty" if inbox.is_dir() else "no inbox dir")
+        else:
+            oldest = min(f.stat().st_mtime for f in files)
+            age_days = max(0.0, (time.time() - oldest) / 86400)
+            add("inbox", "ok" if age_days <= 7 else "warn", f"{len(files)} pending, "
+                f"oldest {age_days:.1f} d")
+    except Exception as exc:
+        add("inbox", "warn", str(exc))
+
+    # ── 4. Search cache freshness (same invalidation logic as _db_sig) ──
+    try:
+        vec_path, meta_path = _search_cache_paths()
+        if not meta_path.exists() or not vec_path.exists():
+            add("search cache", "ok", "absent (rebuilds on first search)")
+        else:
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                cached_sig = tuple(meta.get("sig") or [])
+                fresh = list(_db_sig()) == list(cached_sig)
+                age_h = (time.time() - meta_path.stat().st_mtime) / 3600
+                add("search cache", "ok" if fresh else "warn",
+                    f"{age_h:.1f} h old, "
+                    + ("in sync with DB" if fresh else "STALE vs. DB"))
+            except OSError:
+                raise  # permission/profiling errors -> handled fail line
+    except Exception as exc:
+        add("search cache", "warn", str(exc))
+
+    # ── 5. Last quality-check run ──
+    try:
+        results_dir = Path(get(_CONFIG, "quality_check.output_dir",
+                               str(_WIKIS_ROOT / "quality" / "results")))
+        reports = sorted(results_dir.glob("*.json"),
+                         key=lambda p: p.stat().st_mtime) if results_dir.is_dir() else []
+        if not reports:
+            add("quality check", "ok", "no reports yet")
+        else:
+            latest = reports[-1]
+            age_d = (time.time() - latest.stat().st_mtime) / 86400
+            verdict = "?"
+            try:
+                verdict = str(json.loads(latest.read_text(encoding="utf-8"))
+                              .get("status", "?"))
+            except Exception:
+                pass
+            fine = age_d <= 3 and verdict != "error"
+            add("quality check", "ok" if fine else "warn",
+                f"last run {age_d:.1f} d ago ({latest.name}), status {verdict}")
+    except Exception as exc:
+        add("quality check", "warn", str(exc))
+
+    # ── 6. LLM endpoint (OpenAI-compatible, /v1/models) ──
+    try:
+        url = VLLM_URL.rstrip("/")
+        probe = url if url.endswith("/models") else url + "/models"
+        try:
+            with urllib.request.urlopen(probe, timeout=3) as resp:
+                add("LLM endpoint", "ok" if 200 <= resp.status < 400 else "warn",
+                    f"{probe} HTTP {resp.status}")
+        except urllib.error.HTTPError as exc:
+            add("LLM endpoint", "warn", f"{probe} HTTP {exc.code}")
+        except Exception as exc:
+            add("LLM endpoint", "warn", f"{probe} unreachable: {exc}")
+    except Exception as exc:
+        add("LLM endpoint", "warn", str(exc))
+
+    # ── 7. Embedding backend (Ollama, /api/tags) ──
+    try:
+        probe = OLLAMA_URL.rstrip("/") + "/api/tags"
+        try:
+            with urllib.request.urlopen(probe, timeout=3) as resp:
+                add("Ollama", "ok" if 200 <= resp.status < 400 else "warn",
+                    f"{probe} HTTP {resp.status}")
+        except urllib.error.HTTPError as exc:
+            add("Ollama", "warn", f"{probe} HTTP {exc.code}")
+        except Exception as exc:
+            add("Ollama", "warn", f"{probe} unreachable: {exc}")
+    except Exception as exc:
+        add("Ollama", "warn", str(exc))
+
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    # ── Report ──
+    if as_json:
+        print(json.dumps({
+            "time": datetime.datetime.now().isoformat(timespec="seconds"),
+            "db_path": str(DB_PATH),
+            "healthy": db_ok,
+            "checks": checks,
+        }, indent=2, ensure_ascii=False))
+    else:
+        print("ActiveWiki status")
+        print("=" * 60)
+        icons = {"ok": "\u2705", "warn": "\u26a0\ufe0f", "fail": "\u274c"}
+        for c in checks:
+            print(f"{icons[c['level']]} {c['name']}: {c['detail']}")
+        print("=" * 60)
+        print("HEALTHY" if db_ok else "UNHEALTHY: database unusable")
+    return 0 if db_ok else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Wiki Vector Index + Knowledge Graph - search, build, analyze"
@@ -6109,6 +6274,11 @@ def main() -> int:
         help="Comma-separated list of scopes to search (default: all). Ignored when --session-key is set.",
     )
     sub.add_parser("stats", help="Show index statistics")
+
+    sp_status = sub.add_parser("status",
+                               help="System health check (DB, caches, inbox, endpoints)")
+    sp_status.add_argument("--json", action="store_true",
+                           help="Machine-readable JSON output")
 
     # ── Graph commands ──
     sp_graph = sub.add_parser("graph", help="Knowledge graph operations")
@@ -6278,6 +6448,9 @@ def main() -> int:
 
     elif args.cmd == "stats":
         print(json.dumps(stats(), indent=2, ensure_ascii=False))
+
+    elif args.cmd == "status":
+        return cmd_status(as_json=args.json)
 
     elif args.cmd == "graph":
         gc = getattr(args, "graph_cmd", None)

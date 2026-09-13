@@ -41,6 +41,17 @@ openclaw plugins install --link .
 
 Done. Your agent now searches your wiki in every response.
 
+Curious whether everything is healthy? One command:
+
+```bash
+python3 scripts/vectordb.py status        # or --json for machine-readable output
+# ✅ database: /path/to/wikis/vectordb/index.sqlite (142.3 MB)
+# ✅ integrity: quick_check ok
+# ✅ LLM endpoint: http://localhost:8000/v1/models HTTP 200
+```
+
+It checks the index database, table counts, inbox backlog, search cache freshness, the last quality-check run, and both model endpoints — every factor isolated, so one broken line never takes the check down. Exit code 1 only when the database itself is unusable.
+
 ## Features
 
 ### Semantic Vector Search
@@ -154,6 +165,15 @@ mkdir -p serve && ln -sfn ../output/graph_latest.html serve/graph_latest.html
 - **Home-screen icon:** the HTML embeds favicon and apple-touch-icon inline (base64), so adding the page to your phone's home screen gives it a proper app icon with no extra files
 - **Config:** `graph-html.timeout_seconds` in `activewiki.json` (default 1200) bounds the phase via `timeout` (exit 124 = timeout)
 - **Viewer mode:** `graph.html_mode` in `activewiki.json` (`"2d"` | `"3d"` | `"both"`, default `"3d"`; CLI `--mode` overrides). `both` puts both viewers and a header toggle into one file. Both libraries (`d3`, `3d-force-graph`) are inlined into the exported HTML — no CDN, works on a LAN without internet.
+
+## Installation hardening
+
+You install ActiveWiki into an agent that holds read access to your knowledge base, so treat the install path like any other supply chain:
+
+- **Pin the exact version.** Install `@kiagentkronos-cell/activewiki@1.1.7`, never `latest`. Update channels are an attack vector — a compromised release lands in every unpinned install at once. Check the published version (and its provenance) before each bump.
+- **Allowlist plugins.** In `openclaw.json`, keep an explicit `plugins.allow` list so only reviewed plugins load — a stray or renamed package in the plugins directory then stays inert.
+- **Review before linking.** `openclaw plugins install --link .` points at a working tree: review `git log`/`git diff` of that checkout first, and re-review before every `git pull` there.
+- **Health-check after updates.** `python3 scripts/vectordb.py status` confirms database integrity and endpoint reachability after any upgrade.
 
 ## Full Documentation
 

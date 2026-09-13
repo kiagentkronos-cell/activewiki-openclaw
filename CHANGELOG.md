@@ -5,6 +5,24 @@ All notable changes to the ActiveWiki project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.7] - 2026-09-13
+
+### Added
+- **`vectordb.py status`** — one-command health check: database file +
+  `PRAGMA quick_check`, chunk/entity/relationship counts, inbox backlog
+  (count + oldest age), search-cache freshness against the DB signature
+  (same `_db_sig()` invalidation as the cache itself), last quality-check
+  report age + verdict, and liveness probes for the LLM endpoint
+  (`/v1/models`) and Ollama (`/api/tags`, 3 s timeout). Every factor is
+  isolated in try/except — one broken check degrades to a ⚠️ line, never
+  a traceback. Exit code 1 only when the database itself is unusable; a
+  not-yet-built database is a warning, not a failure. `--json` for
+  machine-readable output.
+- **README: "Installation hardening"** — supply-chain guidance: pin the
+  exact package version (never `latest`), keep a `plugins.allow`
+  allowlist in `openclaw.json`, review linked working trees before
+  pull, health-check after upgrades.
+
 ## [1.1.6] - 2026-09-13
 
 ### Added
