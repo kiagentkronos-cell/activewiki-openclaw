@@ -139,7 +139,7 @@ scripts/check.py --all --since-days 7 --limit 20  # read-only (check only, no pa
 3. **Auto-commit** — uncommitted build changes are committed so the repo is clean for QC commits
 4. **Quality Check** (`check.py --oldest 2`) — nightly fact-verification of the 2 oldest leaf pages vs. their sources (see Quality Check above). Only runs when the inbox is empty and before 02:30, i.e. *after* distill and *before* vectordb — patches are indexed in the same night run
 5. **Vectordb** (`vectordb.py build --graph-incremental --communities --communities-incremental`) — always runs (content-hash-based incremental), even past the deadline
-6. **Graph HTML** (`vectordb.py graph html --all`) — renders the full interactive graph as a single HTML file, atomically published to `output/graph_latest.html` (temp file + `mv`). Budget-gated (`ingest.budget_seconds`), hard-capped by `graph-html.timeout_seconds` (default 1200s), fail-safe: a failure here never aborts the nightly run
+6. **Graph HTML** (`vectordb.py graph html --all --mode <2d|3d|both>`) — renders the full interactive graph as a single HTML file (viewer mode from `graph.html_mode`, default `3d`), atomically published to `output/graph_latest.html` (temp file + `mv`). Budget-gated (`ingest.budget_seconds`), hard-capped by `graph-html.timeout_seconds` (default 1200s), fail-safe: a failure here never aborts the nightly run
 
 ## Daily graph visualization
 
@@ -153,6 +153,7 @@ mkdir -p serve && ln -sfn ../output/graph_latest.html serve/graph_latest.html
 - **Systemd user unit:** [`deploy/wikis-graph.service`](deploy/wikis-graph.service) — adjust the `--directory` path to your installation, then copy to `~/.config/systemd/user/` and `systemctl --user enable --now wikis-graph.service` (plus `loginctl enable-linger $USER` on headless machines)
 - **Home-screen icon:** the HTML embeds favicon and apple-touch-icon inline (base64), so adding the page to your phone's home screen gives it a proper app icon with no extra files
 - **Config:** `graph-html.timeout_seconds` in `activewiki.json` (default 1200) bounds the phase via `timeout` (exit 124 = timeout)
+- **Viewer mode:** `graph.html_mode` in `activewiki.json` (`"2d"` | `"3d"` | `"both"`, default `"3d"`; CLI `--mode` overrides). `both` puts both viewers and a header toggle into one file. Both libraries (`d3`, `3d-force-graph`) are inlined into the exported HTML — no CDN, works on a LAN without internet.
 
 ## Full Documentation
 

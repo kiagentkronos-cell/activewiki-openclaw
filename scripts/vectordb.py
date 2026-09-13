@@ -49,6 +49,7 @@ from config import (
     ollama_url, embed_model, embed_dims, db_path,
     llm_model, llm_url, llm_temperature, llm_max_tokens,
     graph_incremental, graph_communities_enabled, graph_communities_threshold,
+    graph_html_mode,
 )
 
 _CONFIG = load_config(_config_path)
@@ -206,6 +207,9 @@ HTML_GRAPH_MAX_EDGES = 500
 _D3_LOCAL_PATH = Path(__file__).parent.parent / "assets" / "d3.v7.min.js"
 _GRAPH_OUTPUT_DIR = Path(__file__).parent.parent / "output"
 _HTML_TEMPLATE_PATH = Path(__file__).parent.parent / "assets" / "template.html"
+# 3D-Viewer (d3-force-graph-Setup, Entscheidung 13.09.)
+_HTML_3D_TEMPLATE_PATH = Path(__file__).parent.parent / "assets" / "template3d.html"
+_VENDOR_3D_PATH = Path(__file__).parent.parent / "assets" / "vendor" / "3d-force-graph.min.js"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -5302,11 +5306,17 @@ def _generate_html_graph(
     community_members_json: str = "{}",
     has_private: bool = False,
     skip_limits: bool = False,
+    mode: str | None = None,
 ) -> str:
     """Generate an interactive HTML graph file and return its path.
 
     Applies hard limits, writes the file, and sets restrictive permissions.
-    The HTML template is loaded from assets/template.html.
+    Viewer-Auswahl ("2d" | "3d" | "both"): CLI-Flag --mode > Config
+    graph.html_mode > Default "3d" (config.graph_html_mode normalisiert).
+    2D: assets/template.html (D3). 3D: assets/template3d.html mit inline
+    eingebettetem assets/vendor/3d-force-graph.min.js (kein CDN — LAN ohne
+    Internet). both: EINE Datei mit 2D|3D-Umschalter und EINEM geteilten
+    Daten-Blob.
 
     Args:
         query: The original search query (used for filename).
@@ -5335,16 +5345,13 @@ def _generate_html_graph(
                 "Use a more specific query."
             )
 
+    mode = _resolve_html_mode(mode)
+
     # Filename: graph_<md5(query)[:8]>_<timestamp>.html (timestamp prevents browser caching)
     query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:8]
     timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M")
     _GRAPH_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = _GRAPH_OUTPUT_DIR / f"graph_{query_hash}_{timestamp}.html"
-
-    # Load template from file
-    if not _HTML_TEMPLATE_PATH.exists():
-        raise SystemExit(f"HTML template not found: {_HTML_TEMPLATE_PATH}")
-    template_text = _HTML_TEMPLATE_PATH.read_text(encoding="utf-8")
 
     # Build combined data JSON
     data_json = json.dumps({
@@ -5353,11 +5360,13 @@ def _generate_html_graph(
         "community_members": json.loads(community_members_json),
     }, ensure_ascii=False)
 
-    # Replace template variables
     title_safe = html.escape(query)
-    html_content = template_text.replace("{{TITLE}}", f"ActiveWiki Graph — {title_safe}")
-    html_content = html_content.replace("{{DATA_JSON}}", data_json)
-    html_content = html_content.replace("{{HAS_PRIVATE}}", "true" if has_private else "false")
+    if mode == "2d":
+        html_content = _assemble_2d_html(title_safe, data_json, has_private)
+    elif mode == "3d":
+        html_content = _assemble_3d_html(title_safe, data_json, has_private)
+    else:
+        html_content = _assemble_combined_html(title_safe, data_json, has_private)
 
     output_path.write_text(html_content, encoding="utf-8")
     os.chmod(str(output_path), 0o600)
@@ -5365,13 +5374,217 @@ def _generate_html_graph(
     return str(output_path)
 
 
-def cmd_graph_html(query: str, min_confidence: str | None = None, all_graph: bool = False) -> None:
+def _resolve_html_mode(mode: str | None) -> str:
+    """CLI-Flag > activewiki.json graph.html_mode > Default "3d"."""
+    if mode:
+        mode = str(mode).strip().lower()
+        if mode in ("2d", "3d", "both"):
+            return mode
+        log("warn", f"Unknown --mode '{mode}', using config/default mode", stderr=True)
+    return graph_html_mode(_CONFIG)
+
+
+def _section_between(text: str, start: str, end: str, what: str) -> str:
+    """Inhalt zwischen zwei eindeutigen Ankern (fur Template-Bausteine)."""
+    i = text.find(start)
+    j = text.find(end, i + len(start)) if i != -1 else -1
+    if i == -1 or j == -1:
+        raise SystemExit(f"HTML template defekt: {what} nicht gefunden")
+    return text[i + len(start):j]
+
+
+def _load_3d_template() -> str:
+    if not _HTML_3D_TEMPLATE_PATH.exists():
+        raise SystemExit(f"HTML template not found: {_HTML_3D_TEMPLATE_PATH}")
+    return _HTML_3D_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
+def _3d_viewer_script(template: str) -> str:
+    """Inneren Text des 3D-Viewer-<script>-Blocks extrahieren (ohne Tags)."""
+    block = _section_between(template, "<!--BEGIN:JS-->", "<!--END:JS-->", "3D-Viewer-JS")
+    k = block.find("<script>")
+    m = block.rfind("})();")
+    if k == -1 or m == -1:
+        raise SystemExit("HTML template defekt: 3D-Viewer-Script nicht gefunden")
+    return block[k + len("<script>"):m + len("})();")]
+
+
+def _assemble_2d_html(title: str, data_json: str, has_private: bool) -> str:
+    """2D-Viewer aus assets/template.html.
+
+    d3 wird lokal inline eingebettet (No-CDN — LAN ohne Internet); das
+    CDN-<script>-Tag des Templates wird durch das lokale Bundle ersetzt.
+    """
+    if not _HTML_TEMPLATE_PATH.exists():
+        raise SystemExit(f"HTML template not found: {_HTML_TEMPLATE_PATH}")
+    template_text = _HTML_TEMPLATE_PATH.read_text(encoding="utf-8")
+    template_text = _inline_d3(template_text)
+    html_content = template_text.replace("{{TITLE}}", f"ActiveWiki Graph — {title}")
+    html_content = html_content.replace("{{DATA_JSON}}", data_json)
+    html_content = html_content.replace("{{HAS_PRIVATE}}", "true" if has_private else "false")
+    return html_content
+
+
+def _inline_d3(text: str) -> str:
+    """d3-CDN-Tag durch lokales Inline-Bundle ersetzen (No-CDN-Pflicht)."""
+    if not _D3_LOCAL_PATH.exists():
+        raise SystemExit(f"d3-Bibliothek not found: {_D3_LOCAL_PATH}")
+    d3 = _D3_LOCAL_PATH.read_text(encoding="utf-8")
+    if "</script" in d3.lower():
+        raise SystemExit("d3-Bundle enthaelt '</script' — Inline nicht sicher")
+    tag = '<script src="https://d3js.org/d3.v7.min.js"></script>'
+    if tag in text:
+        return text.replace(tag, "<script>" + d3 + "</script>", 1)
+    return text
+
+
+def _assemble_3d_html(title: str, data_json: str, has_private: bool) -> str:
+    """3D-Viewer mit inline eingebetteter 3d-force-graph-Bibliothek (No-CDN).
+
+    Die Bibliothek (three.js mitgebundelt) wird als echtes <script> INLINIERT —
+    kein CDN-Verweis, damit die Datei im LAN ohne Internet funktioniert und der
+    serve/-Symlink ein einzelnes File bleibt. Vorher-Schutz: </script im
+    Bundle wurde beim Download bereits verneint, hier nochmal geprueft.
+    """
+    template = _load_3d_template()
+    bundle = _load_3d_bundle()
+    html_content = template.replace(
+        "<script>/*{{VENDOR_3D}}*/</script>", "<script>" + bundle + "</script>", 1)
+    html_content = html_content.replace("{{TITLE}}", f"ActiveWiki Graph — {title}")
+    html_content = html_content.replace("{{DATA_JSON}}", data_json)
+    html_content = html_content.replace("{{HAS_PRIVATE}}", "true" if has_private else "false")
+    return html_content
+
+
+def _load_3d_bundle() -> str:
+    """3d-force-graph.min.js laden + Inline-Sicherheit pruefen."""
+    if not _VENDOR_3D_PATH.exists():
+        raise SystemExit(f"3D-Bibliothek not found: {_VENDOR_3D_PATH}")
+    bundle = _VENDOR_3D_PATH.read_text(encoding="utf-8")
+    if "</script" in bundle.lower():
+        raise SystemExit("3D-Bundle enthaelt '</script' — Inline nicht sicher")
+    return bundle
+
+
+
+_BOTH_CSS = """<style>
+/* BOTH-Modus: beide Viewer in EINEM Dokument — Umschalten per body-Klasse.
+   Alle Regeln haben ein .hide-2d/.hide-3d-Präfix und ändern im 2d-/3d-only-
+   Modus nichts am Verhalten. */
+body.hide-3d #g3-header,body.hide-3d #g3-banner,body.hide-3d #g3-graph-container,body.hide-3d #g3-label-overlay,body.hide-3d #g3-info,body.hide-3d #g3-hint,body.hide-3d #g3-legend,body.hide-3d #g3-fallback,body.hide-3d #g3-tooltip{display:none!important}
+body.hide-2d #graph-container,body.hide-2d #sidebar,body.hide-2d #tooltip,body.hide-2d #banner,body.hide-2d #header{display:none!important}
+.mode-toggle{display:inline-flex;border:1px solid #30363d;border-radius:6px;overflow:hidden;margin-left:6px;flex-shrink:0}
+.mode-toggle button{background:#21262d;border:none;color:#8b949e;padding:3px 11px;font-size:12px;cursor:pointer}
+body.hide-3d .mode-toggle button[data-mode="2d"],body.hide-2d .mode-toggle button[data-mode="3d"]{background:#1f6feb;color:#fff}
+</style>"""
+
+
+def _mode_toggle_html(prefix: str) -> str:
+    """Umschalter-Markup (einmal pro Header — aktiver Zustand per body-Klasse)."""
+    return (
+        '<span class="mode-toggle" role="group" aria-label="Viewer-Umschalter">'
+        f'<button type="button" data-mode="2d">2D</button>'
+        f'<button type="button" data-mode="3d">3D</button></span>'
+    )
+
+
+def _assemble_combined_html(title: str, data_json: str, has_private: bool) -> str:
+    """Both-Modus: 2D- und 3D-Viewer in EINER Datei, EIN gemeinsamer Daten-Blob.
+
+    Baumaterial: 2D-Template (Kopf-CSS, Body-Markup, Viewer-Script) +
+    3D-Template (CSS/Body/JS als g3-präfixierte Bausteine). d3 und das
+    3D-Bundle werden lokal inline eingebettet (No-CDN). Startmodus: 3D
+    (Entscheidung); Umschalter sitzt in beiden Headern.
+    """
+    if not _HTML_TEMPLATE_PATH.exists():
+        raise SystemExit(f"HTML template not found: {_HTML_TEMPLATE_PATH}")
+    tpl2 = _HTML_TEMPLATE_PATH.read_text(encoding="utf-8")
+    tpl3 = _load_3d_template()
+    bundle = _load_3d_bundle()
+
+    css2 = _section_between(tpl2, "<style>", "</style>", "2D-CSS")
+    body2 = _section_between(tpl2, "<body>", '<script src="https://d3js.org/d3.v7.min.js"></script>', "2D-Markup")
+    p = tpl2.find("<script>\n(function() {")
+    q = tpl2.rfind("})();\n</script>")
+    if p == -1 or q == -1:
+        raise SystemExit("HTML template defekt: 2D-Viewer-Script nicht gefunden")
+    js2 = tpl2[p + len("<script>"):q + len("})();")]
+    if "</script" in js2.lower():
+        raise SystemExit("2D-Viewer-JS enthält '</script' — Kombination nicht sicher")
+    # Gemeinsamen Daten-Blob verwenden statt zweitem Inline-Daten-Statement
+    if "const data = {{DATA_JSON}};" not in js2:
+        raise SystemExit("HTML template defekt: 2D-Datenzeile nicht gefunden")
+    js2 = js2.replace("const data = {{DATA_JSON}};", "const data = GRAPH_DATA;")
+    js2 = js2.replace("{{HAS_PRIVATE}}", "HAS_PRIVATE")
+    js3 = _3d_viewer_script(tpl3)
+
+    css3 = _section_between(tpl3, "<!--BEGIN:CSS-->", "<!--END:CSS-->", "3D-CSS")
+    head3 = tpl3[:tpl3.find("<!--BEGIN:CSS-->")]
+    body3 = _section_between(tpl3, "<!--BEGIN:BODY-->", "<!--END:BODY-->", "3D-Markup")
+
+    # Umschalter einsetzen. 3D-Header: vor den stats (kompakter Header, passt).
+    # 2D-Header: der Header ist eine feste Flex-Zeile (height:44px, kein wrap)
+    # mit breitem sim-controls-Block — hinten eingefallen würde der Toggle bei
+    # engen Viewports in den Overflow rutschen (Bug 13.09: unsichtbar). Deshalb
+    # im 2D-Header als ERSTES Element direkt nach dem Header-Opening.
+    toggle = _mode_toggle_html("")
+    if '<div id="header">' in body2:
+        body2 = body2.replace('<div id="header">', '<div id="header">' + toggle, 1)
+    else:
+        raise SystemExit("HTML template defekt: 2D-Header nicht gefunden")
+    if '<span class="header-stats"' not in body2:
+        raise SystemExit("HTML template defekt: 2D-Headerstats nicht gefunden")
+    if '<span class="header-stats"' in body3:
+        body3 = body3.replace('<span class="header-stats"', toggle + '<span class="header-stats"', 1)
+    else:
+        raise SystemExit("HTML template defekt: 3D-Headerstats nicht gefunden")
+
+    data_block = ("<script>\n\"use strict\";\nconst GRAPH_DATA = " + data_json
+                  + ";\nconst HAS_PRIVATE = " + ("true" if has_private else "false") + ";\n</script>")
+
+    wire = """<script>
+(function() {
+  function setMode(m) {
+    var hide3 = (m === "2d");
+    document.body.classList.toggle("hide-3d", hide3);
+    document.body.classList.toggle("hide-2d", !hide3);
+    try { if (window.deselect) window.deselect(); } catch (e) {}
+  }
+  window.setMode = setMode;   // fuer Test-Harness + spaetere Automation
+  Array.prototype.forEach.call(document.querySelectorAll(".mode-toggle button"), function(b) {
+    b.addEventListener("click", function() { setMode(b.getAttribute("data-mode")); });
+  });
+})();
+</script>"""
+
+    parts = [
+        head3,
+        css3 + "\n<style>" + css2 + "</style>\n" + _BOTH_CSS + "\n</head>\n<body class=\"hide-2d\">\n",
+        body2,
+        body3,
+        "<script>" + _D3_LOCAL_PATH.read_text(encoding="utf-8") + "</script>\n",
+        "<script>" + bundle + "</script>\n",
+        "\n" + data_block + "\n",
+        "<script>" + js2 + "</script>\n",
+        "<script>" + js3 + "</script>\n",
+        wire,
+        "</body>\n</html>\n",
+    ]
+    html_content = "".join(parts)
+    return html_content.replace("{{TITLE}}", f"ActiveWiki Graph — {title}")
+
+
+
+
+def cmd_graph_html(query: str, min_confidence: str | None = None, all_graph: bool = False,
+                   mode: str | None = None) -> None:
     """Generate an interactive HTML graph for a query and print the output path.
 
     Args:
         query: Text to search for seed entities (None = full graph).
         min_confidence: Optional minimum confidence level for relationships.
         all_graph: If True, include ALL entities/relationships regardless of limits.
+        mode: Viewer-Modus "2d"|"3d"|"both" (None = Config graph.html_mode, Default "3d").
     """
     if not _graph_has_tables():
         log(
@@ -5437,6 +5650,7 @@ def cmd_graph_html(query: str, min_confidence: str | None = None, all_graph: boo
         community_members_json=community_members_json,
         has_private=has_private,
         skip_limits=all_graph,
+        mode=mode,
     )
 
     print(output_path)
@@ -6020,6 +6234,12 @@ def main() -> int:
         default=None,
         help="Only include relationships at or above this confidence level",
     )
+    sp_gh.add_argument(
+        "--mode",
+        choices=["2d", "3d", "both"],
+        default=None,
+        help="Viewer-Modus (Default: graph.html_mode aus activewiki.json, sonst '3d')",
+    )
     args = ap.parse_args()
 
     # ── Dispatch ──
@@ -6169,7 +6389,8 @@ def main() -> int:
         elif gc == "html":
             min_conf = getattr(args, "min_confidence", None)
             all_flag = getattr(args, "all_graph", False)
-            cmd_graph_html(args.query, min_confidence=min_conf, all_graph=all_flag)
+            html_mode = getattr(args, "mode", None)
+            cmd_graph_html(args.query, min_confidence=min_conf, all_graph=all_flag, mode=html_mode)
         elif gc == "apply-prompt":
             rule_store = getattr(args, "rule_store", "../evolution_rules.json")
             prompt_path = getattr(args, "prompt", "../extraction_prompt.md")

@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0d1117">
+<title>{{TITLE}}</title>
+<!--BEGIN:CSS-->
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;background:#0d1117;color:#c9d1d9;overflow:hidden;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+#g3-banner{position:fixed;top:0;left:0;right:0;height:28px;background:#da3633;color:#fff;
+  align-items:center;justify-content:center;font-size:12px;font-weight:bold;z-index:1000;display:none}
+#g3-header{position:fixed;top:28px;left:0;right:0;min-height:44px;background:#161b22;
+  border-bottom:1px solid #30363d;display:flex;align-items:center;padding:4px 10px;gap:10px;
+  flex-wrap:wrap;z-index:999}
+#g3-header h1{font-size:14px;font-weight:600;color:#58a6ff}
+#g3-header .header-stats{font-size:12px;color:#8b949e;margin-left:auto;white-space:nowrap}
+#g3-search-input{background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 8px;
+  border-radius:4px;font-size:12px;width:170px;outline:none}
+#g3-search-input:focus{border-color:#58a6ff}
+#g3-fit-btn{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:3px 9px;
+  border-radius:4px;font-size:12px;cursor:pointer;white-space:nowrap}
+#g3-graph-container{position:fixed;top:72px;left:0;right:0;bottom:0;overflow:hidden;touch-action:none}
+#g3-graph-container canvas{display:block}
+#g3-info{position:fixed;right:12px;bottom:12px;max-width:340px;background:#161b22;
+  border:1px solid #30363d;border-radius:8px;padding:12px;font-size:12px;z-index:998;display:none}
+#g3-info .close{position:absolute;top:4px;right:8px;background:none;border:none;color:#8b949e;
+  font-size:18px;cursor:pointer}
+#g3-hint{position:fixed;bottom:8px;left:8px;z-index:900;color:#8b949e;font-size:11px;
+  background:rgba(13,17,23,.7);padding:4px 8px;border-radius:6px;pointer-events:none}
+#g3-label-overlay{position:fixed;top:72px;left:0;pointer-events:none;z-index:997}
+#g3-tooltip{position:fixed;background:#1c2128;border:1px solid #30363d;border-radius:6px;padding:6px 10px;
+  font-size:12px;color:#c9d1d9;pointer-events:none;z-index:1001;max-width:280px;display:none}
+#g3-fallback{position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+  flex-direction:column;gap:12px;background:#0d1117;z-index:2000;text-align:center;padding:24px}
+#g3-fallback .big{font-size:18px;font-weight:700;color:#f85149}
+#g3-fallback .det{font-size:12px;color:#8b949e;max-width:520px;line-height:1.5}
+</style>
+<!--END:CSS-->
+</head>
+<body>
+<!--BEGIN:BODY-->
+<div id="g3-banner">⚠ CONFIDENTIAL — Contains private data</div>
+<div id="g3-header">
+  <h1>{{TITLE}}</h1>
+  <input type="text" id="g3-search-input" placeholder="Knoten suchen…" />
+  <button id="g3-fit-btn">⤢ Anpassen</button>
+  <span class="header-stats" id="g3-header-stats"></span>
+</div>
+<div id="g3-graph-container"></div>
+<canvas id="g3-label-overlay"></canvas>
+<div id="g3-tooltip"></div>
+<div id="g3-info"><button class="close" onclick="window.deselect && window.deselect()">&times;</button><div id="g3-info-body"></div></div>
+<div id="g3-hint">Ziehen = Drehen · Rad/Pinch = Zoom · Klick = Knoten · Leere Fläche = Reset</div>
+<div id="g3-legend" style="position:fixed;left:10px;bottom:10px;z-index:10;background:rgba(13,17,23,.85);border:1px solid #30363d;border-radius:8px;padding:8px 10px;font-size:11px;color:#c9d1d9;line-height:1.7;">
+  <div style="color:#f0883e;font-weight:600;margin-bottom:2px;">Kanten</div>
+  <div><span style="display:inline-block;width:18px;height:2px;background:#5ef08a;vertical-align:middle;margin-right:6px;"></span>extrahiert — belegt</div>
+  <div><span style="display:inline-block;width:18px;height:2px;background:#ffd75e;vertical-align:middle;margin-right:6px;"></span>inferiert — geschlossen</div>
+  <div><span style="display:inline-block;width:18px;height:2px;background:#b9c2cf;vertical-align:middle;margin-right:6px;"></span>schwach — spekulativ</div>
+  <div style="margin-top:4px;color:#8b949e;">Historisch:</div>
+  <div><span style="display:inline-block;width:18px;height:0;border-top:2px dashed #ff8c4b;vertical-align:middle;margin-right:6px;"></span>FUSIONIERTE_MIT</div>
+  <div><span style="display:inline-block;width:18px;height:0;border-top:2px dashed #6fa8ff;vertical-align:middle;margin-right:6px;"></span>NACHFOLGER_VON</div>
+  <div><span style="display:inline-block;width:18px;height:0;border-top:2px dotted #aab4c2;vertical-align:middle;margin-right:6px;"></span>UMGENANNT_ZU</div>
+  <div><span style="display:inline-block;width:18px;height:2px;background:#3ddc7a;vertical-align:middle;margin-right:6px;"></span>AUFGETEILT_IN</div>
+</div>
+<div id="g3-fallback">
+  <div class="big">⚠ Keine WebGL-Unterstützung</div>
+  <div class="det">Dieser Graph braucht WebGL (three.js). Dein Browser/Gerät stellt keinen WebGL-Kontext bereit.
+  Bitte aktuellen Browser testen oder hardwarebeschleunigte Grafikausgabe aktivieren.</div>
+  <div class="det" id="g3-fallback-detail"></div>
+</div>
+<!--END:BODY-->
+
+<!-- 3d-force-graph 1.73.4 (three.js mitgebundelt) — wird zur Generierungszeit INLINIERT (kein CDN, LAN ohne Internet) -->
+<script>/*{{VENDOR_3D}}*/</script>
+<script>
+"use strict";
+const GRAPH_DATA = {{DATA_JSON}};
+const HAS_PRIVATE = {{HAS_PRIVATE}};
+</script>
+<!--BEGIN:JS-->
+<script>
+"use strict";
+/* =====================================================================
+   3D-Viewer (3d-force-graph / three.js, WebGL).
+   Produktionsversion des Prototyps option1-3d.html (Entscheidung 13.09.):
+   - Community-Farben (Turbo-Palette)
+   - Suchfeld + Klick-Auswahl mit Nachbarn-Highlight
+   - Rotation/Zoom built-in (OrbitControls), Nodes fest (enableNodeDrag false)
+   - Klick-vs-Drag-Gate (pointermove > 6 px => keine Auswahl-Aenderung)
+   - Labels: Screen-space-Canvas-Overlay, 7 px fix, Nahe-Gate LABEL_NEAR +
+     De-Clutter-Raster (kein built-in-TextSprite)
+   - Kantenschema wie 2D: Confidence-Farbe + HIST_COLORS-Overlay
+   - WebGL-/Lib-Check VOR dem Rendern (Fallback-Panel statt schwarzer Screen)
+   Datenformat wie im 2D-Template: links mit source_id/target_id.
+   IDs praefix "g3-" — damit BOTH-Modus und 2D-Viewer in EINER Datei
+   kollisionsfrei koexistieren koennen.
+   ===================================================================== */
+(function() {
+if (typeof ForceGraph3D === "function") {
+  boot();
+} else {
+  // BOTH-Modus: Bibliothek wird lazy geladen — Booten erfolgt spaeter via
+  // g3LazyBoot (aufgerufen vom Umschalter nach g3LazyLoadLib).
+  window.g3LazyBoot = function() {
+    if (typeof ForceGraph3D === "function") { boot(); }
+    else { showFallback("3d-force-graph konnte nicht geladen werden (inline-JS beschädigt?)."); }
+  };
+}
+
+function showFallback(detail) {
+  var f = document.getElementById("g3-fallback");
+  f.style.display = "flex";
+  if (detail) document.getElementById("g3-fallback-detail").textContent = String(detail);
+  var c = document.getElementById("g3-graph-container");
+  if (c) c.style.display = "none";
+}
+function webglSupported() {
+  try {
+    var c = document.createElement("canvas");
+    return !!(window.WebGLRenderingContext &&
+      (c.getContext("webgl") || c.getContext("experimental-webgl")));
+  } catch (e) { return false; }
+}
+
+function boot() {
+  if (HAS_PRIVATE) document.getElementById("g3-banner").style.display = "flex";
+  if (!webglSupported()) { showFallback(null); return; }
+
+  // ── Daten ───────────────────────────────────────────────────────
+  // Production-Format: links {source_id,target_id,...} → hier auf source/target mappen.
+  // BOTH-Modus (body-Klasse hide-2d/hide-3d vorhanden): der 2D-Viewer bootet
+  // mit denselben Node-Objekten und d3-force schreibt x/y hinein. d3-force-3d
+  // erbt vorhandenes x/y und lässt z bei 0 → flache Platte. Deshalb im BOTH-
+  // Modus flache Kopien der Knoten bauen (isolierte Objekte pro Viewer).
+  // Im 3d-only-Modus (keine body-Klasse) bleibt die Referenz unverändert.
+  const isBoth = document.body.classList.contains("hide-2d") ||
+                 document.body.classList.contains("hide-3d");
+  const nodes = isBoth ? GRAPH_DATA.nodes.map(n => ({...n})) : GRAPH_DATA.nodes;
+  const links = (GRAPH_DATA.links || []).map(l => ({
+    source: l.source_id != null ? l.source_id : l.source,
+    target: l.target_id != null ? l.target_id : l.target,
+    relation_type: l.relation_type || "",
+    confidence: l.confidence || ""
+  }));
+  document.getElementById("g3-header-stats").textContent =
+    nodes.length + " nodes · " + links.length + " links";
+
+  const nodeById = new Map(nodes.map(n => [n.id, n]));
+  nodes.forEach(n => { n.deg = n.linkCount || 0; });
+
+  // Adjazenz fuer Highlight
+  const nbrs = new Map(nodes.map(n => [n.id, new Set([n.id])]));
+  links.forEach(l => {
+    if (nbrs.has(l.source)) nbrs.get(l.source).add(l.target);
+    if (nbrs.has(l.target)) nbrs.get(l.target).add(l.source);
+  });
+
+  // Community-Farben (Turbo) ueber sortierte community_id der Knoten
+  const commIdSet = new Set();
+  nodes.forEach(n => { if (n.community_id) commIdSet.add(n.community_id); });
+  const commIds = Array.from(commIdSet).sort();
+  const commColorOf = {};
+  commIds.forEach((cid, i) => { commColorOf[cid] = d3Turbo(i / Math.max(commIds.length - 1, 1)); });
+  // Mini-Interpolateur (kein d3 noetig): Turbo-Naeherung via 5-Stuetzstellen
+  function d3Turbo(t) {
+    const stops = [[0.19,0.07,0.23],[0.33,0.59,0.04],[0.93,0.85,0.04],[0.98,0.45,0.05],[0.55,0.06,0.12]];
+    t = Math.max(0, Math.min(1, t)) * (stops.length - 1);
+    const i = Math.min(Math.floor(t), stops.length - 2), f = t - i;
+    const c = stops[i].map((v, j) => Math.round((v + (stops[i+1][j] - v) * f) * 255));
+    return "rgb(" + c[0] + "," + c[1] + "," + c[2] + ")";
+  }
+  function colorOf(n) { return commColorOf[n.community_id] || "#8b949e"; }
+
+  // ── Auswahl-Zustand ─────────────────────────────────────────────
+  let selectedId = null;      // Klick-Auswahl
+  let searchIds = null;       // Set aus Suche oder null
+  function activeSet() {
+    if (searchIds) return searchIds;
+    if (selectedId) return nbrs.get(selectedId);
+    return null;
+  }
+  function refresh() {
+    const as = activeSet();
+    g.nodeColor(n => !as || as.has(n.id) ? colorOf(n) : "#21262d");
+    g.linkColor(l => {
+      if (!as) return confidenceColor(l);
+      const s = typeof l.source === "object" ? l.source.id : l.source;
+      const t = typeof l.target === "object" ? l.target.id : l.target;
+      return (as.has(s) && as.has(t)) ? confidenceColor(l) : "#30363d";
+    });
+    // Labels: Screen-space-Overlay (see below) — nur Dimming-Set durchreichen
+    overlayDim = as;
+    drawOverlay();
+  }
+  // Kantenschema wie in der 2D-Version (assets/template.html):
+  // historische Uebergänge haben eigene Farbe, sonst Confidence-Farbe.
+  const HIST_COLORS = { FUSIONIERTE_MIT: "#ff8c4b", NACHFOLGER_VON: "#6fa8ff", UMGENANNT_ZU: "#aab4c2", AUFGETEILT_IN: "#3ddc7a" };
+  function confidenceColor(l) {
+    const rt = String(l.relation_type || "").toUpperCase();
+    if (HIST_COLORS[rt]) return HIST_COLORS[rt];
+    if (l.confidence === "weak") return "#b9c2cf";
+    if (l.confidence === "inferred") return "#ffd75e";
+    return "#5ef08a";
+  }
+
+  // ── Graph ───────────────────────────────────────────────────────
+  const container = document.getElementById("g3-graph-container");
+  let overlayDim = null;   // Dimming-Set fuer das Label-Overlay
+  let g;
+  try {
+    g = ForceGraph3D()(container)
+      .graphData({ nodes: nodes, links: links })
+      .backgroundColor("#0d1117")
+      .nodeVal(n => 1 + Math.sqrt(n.deg) * 1.4)
+      .nodeRelSize(8)
+      .nodeResolution(8)
+      .nodeColor(colorOf)
+      .nodeLabel(() => null)   // Dauerlabels: Screen-space-Overlay (s.u.), nicht als TextSprite
+      .linkWidth(2.2)
+      .linkOpacity(0.6)
+      .linkColor(confidenceColor)
+      .showNavInfo(false)
+      .enableNodeDrag(false)   // Nodes sind fest — Drag stört beim Navigieren
+      .onNodeClick(n => {
+        if (dragMoved) return;                     // Knoten bewegen/Navigation = keine Abwahl
+        if (selectedId === n.id) { deselect(); return; }  // zweiter Klick aufs gleiche Ding = abwaehlen
+        selectedId = n.id; searchIds = null;
+        document.getElementById("g3-search-input").value = "";
+        showInfo(n); refresh();
+      })
+      .onBackgroundClick(() => {
+        if (dragMoved) return;                     // Pan/Rotate loescht nie mehr die Auswahl
+        deselect();
+      });
+    // Klick nur wenn die Maus zwischen down und up < 6 px bewegt wurde
+    var dragMoved = false, downX = 0, downY = 0;
+    container.addEventListener("pointerdown", e => { dragMoved = false; downX = e.clientX; downY = e.clientY; }, true);
+    container.addEventListener("pointermove", e => {
+      if (downX || downY) { if (Math.abs(e.clientX - downX) > 6 || Math.abs(e.clientY - downY) > 6) dragMoved = true; }
+    }, true);
+  } catch (err) {
+    // three.js/WebGL-Kontext-Fehler: nie schwarz bleiben
+    showFallback("Renderer-Fehler: " + err.message);
+    return;
+  }
+  window.addEventListener("error", ev => {
+    if (ev.message && /webgl|three|renderer/i.test(ev.message)) showFallback(ev.message);
+  });
+
+  // ── Labels via 2D-Canvas-Overlay ueber dem WebGL-Canvas.
+  // Korrektur 12.09./13.09.: built-in-TextSprites aus (perspektivisch
+  // skalierte Monster-Texte). Stattdessen Screen-Overlay: Font fix 7 CSS-px,
+  // Sichtbarkeit pro Knoten ueber Nahe-Gate (LABEL_NEAR * Gesamt-View-Distanz)
+  // + De-Clutter-Raster. Auswahl/Suche-Set hebt das Gate auf.
+  const overlay = document.getElementById("g3-label-overlay");
+  const octx = overlay.getContext("2d");
+  const tooltipEl = document.getElementById("g3-tooltip");
+  let lastCam = { px: NaN, py: NaN, pz: NaN, q: [NaN, NaN, NaN, NaN] };
+  let refD = null;   // Referenz-Kameradistanz (Auto-Fit)
+
+  function sizeOverlay() {
+    const dpr = window.devicePixelRatio || 1;
+    overlay.style.width = container.clientWidth + "px";
+    overlay.style.height = container.clientHeight + "px";
+    overlay.width = Math.round(container.clientWidth * dpr);
+    overlay.height = Math.round(container.clientHeight * dpr);
+    octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    lastCam.px = NaN;   // erzwinge Neuzeichnung
+  }
+  const dcGen2 = Object.create(null); let dcStamp = 0; let drawOrder = null;
+  let refDist = 0;   // Gesamt-View-Distanz (Auto-Fit) — Basis des Nahe-Gates
+  const LABEL_NEAR = 0.9;  // 13.09.: eher einblenden
+  function camDist() { const c = g.camera(); return c ? c.position.length() : 0; }
+  try { g.onEngineStop(() => { if (!refDist) refDist = camDist(); }); } catch (e) {}
+  function clipLabel(s) { s = String(s || ""); return s.length > 28 ? s.slice(0, 27) + "…" : s; }
+  function drawOverlay() {
+    const W = container.clientWidth, H = container.clientHeight;
+    const cam = g.camera();
+    if (!cam || !cam.projectionMatrix || !cam.matrixWorldInverse) return;
+    const m = cam.matrixWorldInverse, p = cam.projectionMatrix, e = m.elements, pe = p.elements;
+    if (!refDist) { const d0 = camDist(); if (d0 > 0) refDist = d0; }  // Fallback: erste Draw = Gesamt-View
+    octx.clearRect(0, 0, W, H);
+    dcStamp++;   // De-Clutter-Generation
+    // Naechste Knoten zuerst zeichnen (wollen bei Dichte die nahen Labels)
+    if (!drawOrder) { drawOrder = nodes.map((_, i) => i); }
+    drawOrder.sort((a, b) => {
+      const A = nodes[a], B = nodes[b];
+      const za = isFinite(A.z) ? A.z : 0, zb = isFinite(B.z) ? B.z : 0;
+      return za - zb;
+    });
+    if (refD == null && cam.position) refD = cam.position.length() || 1;
+    octx.textBaseline = "middle";
+    octx.lineWidth = 2.5;
+    octx.strokeStyle = "#0d1117";
+    octx.lineJoin = "round";
+    let vis = 0;
+    for (let oi = 0; oi < drawOrder.length; oi++) {
+      const n = nodes[drawOrder[oi]];
+      if (overlayDim && !overlayDim.has(n.id)) continue;
+      const nx = n.x, ny = n.y, nz = n.z;   // d3-force-3d schreibt x/y/z direkt
+      if (!isFinite(nx) || !isFinite(ny) || !isFinite(nz)) continue;
+      const cx = e[0]*nx + e[4]*ny + e[8]*nz + e[12];
+      const cy = e[1]*nx + e[5]*ny + e[9]*nz + e[13];
+      const cz = e[2]*nx + e[6]*ny + e[10]*nz + e[14];
+      const cw = e[3]*nx + e[7]*ny + e[11]*nz + e[15];
+      const px = pe[0]*cx + pe[4]*cy + pe[8]*cz + pe[12]*cw;
+      const py = pe[1]*cx + pe[5]*cy + pe[9]*cz + pe[13]*cw;
+      const pw = pe[3]*cx + pe[7]*cy + pe[11]*cz + pe[15]*cw;
+      if (pw <= 0) continue;
+      const sx = (px / pw * 0.5 + 0.5) * W;
+      const sy = (0.5 - py / pw * 0.5) * H;
+      if (sx < -80 || sx > W + 80 || sy < -20 || sy > H + 20) continue;
+      // De-Clutter: naechste zuerst, Ueberlappungs-Raster.
+      // Font immer fix 7 CSS-px — skaliert NICHT mit Distanz.
+      const asNow = activeSet();
+      const important = n.id === selectedId || (asNow && asNow.has(n.id));
+      if (!important && refDist) {
+        // Distanz Kamera -> dieser Knoten (Weltkoordinaten)
+        const cpos = g.camera().position;
+        const ddx = (isFinite(n.x) ? n.x : 0) - cpos.x;
+        const ddy = (isFinite(n.y) ? n.y : 0) - cpos.y;
+        const ddz = (isFinite(n.z) ? n.z : 0) - cpos.z;
+        if (Math.sqrt(ddx*ddx + ddy*ddy + ddz*ddz) > refDist * LABEL_NEAR) continue;
+      }
+      if (!important) {
+        const gx = Math.floor(sx / 88), gy = Math.floor(sy / 16);
+        const key = (gy + 64) * 4096 + (gx + 64);
+        if (dcGen2[key] === dcStamp) continue;
+        for (let gx2 = gx; gx2 <= gx + 2; gx2++) dcGen2[(gy + 64) * 4096 + (gx2 + 64)] = dcStamp;
+      }
+      if (++vis > 2500) break;   // Kappe: Canvas-Text bleibt unterhalb fluessig
+      octx.font = "7px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
+      octx.fillStyle = n.id === selectedId ? "#e6edf3" : "#8b949e";
+      const txt = clipLabel(n.label || n.id);
+      octx.strokeText(txt, sx + 5, sy);
+      octx.fillText(txt, sx + 5, sy);
+    }
+  }
+  function camChanged() {
+    const c = g.camera();
+    if (!c) return true;
+    const p = c.position, q = c.quaternion;
+    const l = lastCam;
+    const same = p && q && Math.abs(p.x-l.px)<1e-4 && Math.abs(p.y-l.py)<1e-4 &&
+      Math.abs(p.z-l.pz)<1e-4 && Math.abs(q.x-l.q[0])<1e-5 && Math.abs(q.y-l.q[1])<1e-5 &&
+      Math.abs(q.z-l.q[2])<1e-5 && Math.abs(q.w-l.q[3])<1e-5;
+    if (!same) { l.px=p.x; l.py=p.y; l.pz=p.z; l.q=[q.x,q.y,q.z,q.w]; }
+    return !same;
+  }
+  let tickDirty = false;
+  try { g.onEngineTick(() => { tickDirty = true; }); } catch (e) {}
+  try { g.onZoom(() => { tickDirty = true; }); } catch (e) {}
+  (function overlayLoop() {
+    if (g3Active()) { if (camChanged() || tickDirty) { drawOverlay(); tickDirty = false; } }
+    requestAnimationFrame(overlayLoop);
+  })();
+  window.addEventListener("resize", sizeOverlay);
+  sizeOverlay();
+
+  // Hover-/Tap-Tooltip (HTML statt Label-Sprite)
+  g.onNodeHover(n => {
+    if (!n) { tooltipEl.style.display = "none"; return; }
+    tooltipEl.innerHTML = '<b style="color:#58a6ff;">' +
+      String(n.label || n.id).replace(/</g,"&lt;") + '</b><br><span style="color:#8b949e;">' +
+      String(n.type || "") + " · " + n.deg + " Links</span>";
+    tooltipEl.style.display = "block";
+  });
+  document.addEventListener("mousemove", ev => {
+    if (tooltipEl.style.display === "block") {
+      tooltipEl.style.left = Math.min(ev.clientX + 14, window.innerWidth - 300) + "px";
+      tooltipEl.style.top = Math.min(ev.clientY + 14, window.innerHeight - 100) + "px";
+    }
+  });
+
+  g.d3Force("charge").strength(-90);
+  g.d3Force("link").distance(90);
+
+  function deselect() {
+    selectedId = null; searchIds = null;
+    document.getElementById("g3-info").style.display = "none";
+    refresh();
+  }
+  window.deselect = deselect;   // fuer onclick im Info-Panel + BOTH-Toggle
+  function showInfo(n) {
+    const body = document.getElementById("g3-info-body");
+    let rel = "";
+    links.forEach(l => {
+      const s = typeof l.source === "object" ? l.source.id : l.source;
+      const t = typeof l.target === "object" ? l.target.id : l.target;
+      if (s === n.id || t === n.id) {
+        const o = nodeById.get(s === n.id ? t : s);
+        rel += '<div style="padding:2px 0;">' + (s === n.id ? "→ " : "← ") +
+          "<span style=\"color:#58a6ff;\">" + String(o ? o.label : "?").replace(/</g,"&lt;") + "</span>" +
+          ' <span style="color:#8b949e;font-size:10px;">[' + String(l.relation_type || "") + "]</span></div>";
+      }
+    });
+    const capped = rel.split("<div").slice(0, 41).join("<div");
+    body.innerHTML = '<b style="color:#58a6ff;font-size:14px;">' + String(n.label || n.id).replace(/</g,"&lt;") +
+      "</b> <span style=\"color:#8b949e;\">" + String(n.type || "") + "</span>" +
+      '<div style="margin-top:6px;color:#8b949e;">Community ' + String(n.community_id || "—") +
+      " · " + n.deg + " Links</div>" +
+      '<div style="margin-top:6px;max-height:180px;overflow-y:auto;">' + capped + "</div>";
+    document.getElementById("g3-info").style.display = "block";
+  }
+
+  // ── Suche ───────────────────────────────────────────────────────
+  let searchTimer = null;
+  document.getElementById("g3-search-input").addEventListener("input", function () {
+    clearTimeout(searchTimer);
+    const q = this.value.trim().toLowerCase();
+    searchTimer = setTimeout(() => {
+      if (!q) { searchIds = null; }
+      else {
+        searchIds = new Set();
+        nodes.forEach(n => {
+          if ((n.label && String(n.label).toLowerCase().indexOf(q) !== -1) ||
+              (n.type && String(n.type).toLowerCase().indexOf(q) !== -1)) searchIds.add(n.id);
+        });
+      }
+      refresh();
+    }, 250);
+  });
+
+  // ── Fit-to-view ─────────────────────────────────────────────────
+  document.getElementById("g3-fit-btn").addEventListener("click", () => {
+    try { g.zoomToFit(400, 60); } catch (e) {}
+  });
+
+  // KEIN auto zoomToFit bei Sim-Stop — jeder Reheat setzte sonst den Zoom zurueck
+  refresh();
+  setTimeout(() => { const h = document.getElementById("g3-hint"); if (h) h.style.display = "none"; }, 6000);
+}
+
+// BOTH-Modus: true wenn der 3D-Viewer gerade sichtbar ist (sonst Overlay-Loop pausieren).
+// Im 3d-only-Modus immer true.
+function g3Active() {
+  if (document.body.classList.contains("hide-3d")) return false;
+  const w = document.getElementById("g3-viewer-wrap");
+  return !w || w.style.display !== "none";
+}
+})();
+</script>
+<!--END:JS-->
+</body>
+</html>

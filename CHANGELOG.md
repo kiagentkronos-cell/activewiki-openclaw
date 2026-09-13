@@ -5,6 +5,45 @@ All notable changes to the ActiveWiki project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.6] - 2026-09-13
+
+### Added
+- **3D graph viewer**: `assets/template3d.html` renders the knowledge graph
+  spatially with `3d-force-graph` (fixed nodes, drag-vs-click gating,
+  screen-space overlay labels with a distance gate and de-clutter pass,
+  edge schema/legend identical to the 2D view, WebGL fallback panel).
+- **`graph.html_mode` config key** (`"2d" | "3d" | "both"`, default `"3d"`)
+  with a `--mode` CLI flag on `vectordb.py graph html` (CLI > config >
+  default; unknown values warn and fall back). `config.graph_html_mode()`
+  normalizes the value; `run_inbox.sh` passes the configured mode through
+  to the nightly `graph-html` phase.
+- **`both` mode**: one file, one shared data blob, a 2D|3D toggle in the
+  header. No-CDN requirement: `d3` and the 3D library are inlined into the
+  generated HTML (`assets/d3.v7.min.js`,
+  `assets/vendor/3d-force-graph.min.js`), so the exported file works on a
+  LAN without internet and `serve/` stays a single-file symlink.
+
+### Fixed
+- **3D layer was flat in `both` mode**: the 2D viewer boots first and
+  d3-force writes `x`/`y` into the shared node objects, which d3-force-3d
+  inherits while leaving `z` at 0. The 3D viewer now builds flat node
+  copies per viewer in `both` mode (3d-only keeps the shared reference).
+- **Toggle invisible in the 2D view**: `#header` is a fixed flex row
+  without wrapping, so a toggle appended at the end slid into overflow.
+  It is injected as the first header child with `flex-shrink: 0`
+  (`setMode` is additionally exposed as `window.setMode`).
+- **2D zoom-out limit**: `scaleExtent` `[0.15, 6]` → `[0.01, 8]`; the fit
+  algorithm clamps correctly against the new limit.
+
+### Changed
+- **2D simulation convergence stop**: `alphaMin(0.02)` +
+  `velocityDecay(0.55)` + `alphaDecay` start value 0.04. d3 used to stop
+  only at alpha 0.001 (~300 ticks) with visible micro-jitter; now ~66
+  ticks and sub-pixel residual energy. Link/label attribute updates run
+  only while `alpha > 0.005` or a drag is active (node transforms stay
+  per-tick to protect against drag freeze); highlight and zoom/pan are
+  tick-independent and keep working after the simulation stops.
+
 ## [1.1.5] - 2026-09-10
 
 ### Added

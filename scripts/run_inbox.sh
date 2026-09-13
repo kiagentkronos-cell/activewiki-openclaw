@@ -48,6 +48,9 @@ BUDGET_SECONDS="$(get_cfg ingest.budget_seconds)"
 BUDGET_SECONDS="${BUDGET_SECONDS:-16200}"
 GH_TIMEOUT="$(get_cfg graph-html.timeout_seconds)"
 GH_TIMEOUT="${GH_TIMEOUT:-1200}"
+# Viewer mode for the graph-html phase (2d|3d|both); default 3d.
+# vectordb.py reads the config itself — the flag is only passed when set.
+GH_MODE="$(get_cfg graph.html_mode)"
 
 export WIKIS_DEADLINE="${DEADLINE:-03:00}"
 export WIKIS_TIMEZONE="${TIMEZONE:-Europe/Berlin}"
@@ -205,12 +208,19 @@ fi
 if past_budget; then
     echo "[$(stamp)] skipped graph-html: run budget (${BUDGET_SECONDS}s) exceeded" >>"$LOG"
 else
-    echo "[$(stamp)] graph-html start (graph html --all, timeout=${GH_TIMEOUT}s)" >>"$LOG"
+    echo "[$(stamp)] graph-html start (graph html --all --mode ${GH_MODE:-config|3d}, timeout=${GH_TIMEOUT}s)" >>"$LOG"
     mkdir -p output
     GH_TMP="$(mktemp "output/.graph_latest.XXXXXX")"
     GH_OUT="$(mktemp)"
     GH_RC=0
-    timeout "$GH_TIMEOUT" "$PYTHON" scripts/vectordb.py graph html --all >"$GH_OUT" 2>&1 || GH_RC=$?
+    GH_MODE_FLAG=""
+    case "$GH_MODE" in
+        2d|3d|both) GH_MODE_FLAG="--mode $GH_MODE" ;;
+        "") : ;;  # config without key -> vectordb default "3d"
+        *) echo "[$(stamp)] graph-html: unknown graph.html_mode '$GH_MODE' in config, using default" >>"$LOG" ;;
+    esac
+    # shellcheck disable=SC2086  # GH_MODE_FLAG is either empty or "--mode <value>"
+    timeout "$GH_TIMEOUT" "$PYTHON" scripts/vectordb.py graph html --all $GH_MODE_FLAG >"$GH_OUT" 2>&1 || GH_RC=$?
     # Sub-output into the main log (last lines contain the output path).
     tail -n 20 "$GH_OUT" >>"$LOG" 2>/dev/null
     GH_PATH="$(tail -n 1 "$GH_OUT" | tr -d '[:space:]')"

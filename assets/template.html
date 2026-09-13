@@ -278,7 +278,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 
   // Zoom / Pan
   var zoom = d3.zoom()
-    .scaleExtent([0.15, 6])
+    .scaleExtent([0.01, 8])
     .on("zoom", function(event) {
       zoomGroup.attr("transform", event.transform);
     });
@@ -290,6 +290,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
   var simulation = d3.forceSimulation(nodes)
     .force("link", d3.forceLink(links).id(function(d) { return d.id; }).distance(120))
     .force("charge", d3.forceManyBody().strength(-320))
+    // Konvergenz-Stop: d3 stoppt wenn alpha < alphaMin (Default 0.001 → ~300 Ticks).
+    // alpha-Zerfall ist exponentiell: alpha_n = (1-decay)^n. Bei decay=0.04:
+    // n = ln(0.02/0.3)/ln(0.96) ≈ 66 Ticks bis alphaMin=0.02. Bei dieser
+    // Restenergie liegen Positionsänderungen unter ~1 px/tick → visuell Stillstand.
+    // velocityDecay 0.4→0.55: mehr Reibung, kürzeres Nachwackeln (Trägheit runter).
+    .alphaDecay(0.04)
+    .alphaMin(0.02)
+    .velocityDecay(0.55)
     .force("center", d3.forceCenter(width / 2, height / 2))
     .force("collision", d3.forceCollide().radius(function(d) { return nodeRadius(d) + 8; }))
     .force("x", d3.forceX(width / 2).strength(0.06))
@@ -581,15 +589,25 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 
   // ── Tick ──────────────────────────────────────────────────────
   simulation.on("tick", function() {
-    linkLines
-      .attr("x1", function(d) { return d.source.x; })
-      .attr("y1", function(d) { return d.source.y; })
-      .attr("x2", function(d) { return d.target.x; })
-      .attr("y2", function(d) { return d.target.y; });
+    // Position-Updates immer — sonst friert ein laufender Drag ein (Alpha liegt
+    // dort beim Ziehen am alphaTarget 0.3). Link-/Label-Updates (mehrere
+    // Attribute pro Tick auf SVG — der teure Teil) nur solange die Geometrie
+    // sich noch messbar bewegt (alpha > 0.005). Danach bleiben Linien starr,
+    // Nodes laufen die sub-px-Reste aus. Selection/Highlight laufen
+    // ausschließlich über CSS-Klassen, Zoom/Pan nur per Gruppen-transform —
+    // beides tick-unabhängig.
+    var dragging = simulation.alphaTarget() > 0;
+    if (simulation.alpha() > 0.005 || dragging) {
+      linkLines
+        .attr("x1", function(d) { return d.source.x; })
+        .attr("y1", function(d) { return d.source.y; })
+        .attr("x2", function(d) { return d.target.x; })
+        .attr("y2", function(d) { return d.target.y; });
 
-    linkLabels
-      .attr("x", function(d) { return (d.source.x + d.target.x) / 2; })
-      .attr("y", function(d) { return (d.source.y + d.target.y) / 2 - 6; });
+      linkLabels
+        .attr("x", function(d) { return (d.source.x + d.target.x) / 2; })
+        .attr("y", function(d) { return (d.source.y + d.target.y) / 2 - 6; });
+    }
 
     nodeGroup.attr("transform", function(d) { return "translate(" + d.x + "," + d.y + ")"; });
   });

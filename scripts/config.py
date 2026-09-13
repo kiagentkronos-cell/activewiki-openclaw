@@ -180,6 +180,12 @@ def graph_communities_threshold(config: dict[str, Any]) -> int:
     return int(get(config, "graph.communities_incremental_threshold", 5))
 
 
+def graph_html_mode(config: dict[str, Any]) -> str:
+    """HTML-Viewer-Modus: "2d" | "3d" | "both" (Default "3d")."""
+    mode = str(get(config, "graph.html_mode", "3d") or "3d").strip().lower()
+    return mode if mode in ("2d", "3d", "both") else "3d"
+
+
 def ingest_deadline(config: dict[str, Any]) -> str:
     return get(config, "ingest.deadline", "03:00")
 

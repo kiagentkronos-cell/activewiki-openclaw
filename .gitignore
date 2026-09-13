@@ -8,6 +8,7 @@ __pycache__/
 
 # Vektor-DB Search-Cache (baut sich automatisch neu)
 vectordb/
+search_cache/
 *.tmp.npy
 *.tmp.json
 
@@ -15,6 +16,7 @@ vectordb/
 logs/
 trash/
 *.bak-
+*.bak-*
 
 # Venvs
 venv/
