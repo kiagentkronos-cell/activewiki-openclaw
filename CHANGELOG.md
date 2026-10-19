@@ -5,6 +5,30 @@ All notable changes to the ActiveWiki project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.9] - 2026-10-19
+
+### Added
+- **`scripts/launch_nightly.sh`** — launcher that starts the nightly
+  pipeline as a systemd *user* oneshot unit
+  (`activewiki-nightly-<YYYY-MM-DD>`) instead of a bare `nohup setsid`
+  child. Rationale: process trees started from an agent/exec session can be
+  reaped when that session's turn ends, killing the nightly run mid-phase;
+  a user unit is independent of the launching session's lifecycle. Repo
+  root is detected script-relative (override: `ACTIVEWIKI_ROOT`), the uid
+  is resolved via `$(id -u)` — no hardcoded install paths. A legacy nohup
+  fallback keeps working where systemd-run or the user bus is unavailable
+  (the fallback deliberately does not reference `$!` — it is unset under
+  `set -u` in that subshell pattern). The unit name must be passed via
+  `--unit=` (a bare positional is treated as the executable by
+  systemd-run).
+
+### Changed
+- **Nightly QC phase hard timeout** (`run_inbox.sh`) — the quality-check
+  phase now runs under `timeout -k 10 900`, mirroring the copy's
+  graph-html-phase pattern: exit 124 is logged distinctly as a phase
+  timeout and the run continues; the exit code is captured before the
+  `$(stamp)` substitution.
+
 ## [1.1.8] - 2026-10-19
 
 ### Added

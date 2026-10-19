@@ -171,9 +171,20 @@ if [ "$(find inbox/"${QC_SCOPES[@]}" -type f 2>/dev/null | wc -l)" -ne 0 ]; then
 elif [ "$(date +%H:%M)" \> "$QC_DEADLINE" ]; then
     echo "[$(stamp)] quality-check skipped: time window" >>"$LOG"
 else
-    echo "[$(stamp)] quality-check start (oldest 2)" >>"$LOG"
-    "$PYTHON" scripts/check.py --oldest 2 >>"$LOG" 2>&1
-    echo "[$(stamp)] quality-check end (exit $?)" >>"$LOG"
+    # Hard phase boundary via timeout (exit 124 = timeout): 900s for both QC
+    # pages incl. retry — quality_check.timeout_seconds stays the per-call
+    # timeout, 900 gives headroom below it. Same pattern as the graph-html
+    # phase (timeout + distinct exit-124 log line).
+    echo "[$(stamp)] quality-check start (oldest 2, timeout=900s)" >>"$LOG"
+    QC_RC=0
+    timeout -k 10 900 "$PYTHON" scripts/check.py --oldest 2 >>"$LOG" 2>&1 || QC_RC=$?
+    # Capture the exit code BEFORE the $(stamp) substitution — otherwise the
+    # successful date call overwrites $? and "exit 0" is always logged.
+    if [ "$QC_RC" -eq 124 ]; then
+        echo "[$(stamp)] quality-check TIMEOUT after 900s (exit 124) — phase killed, continuing run" >>"$LOG"
+    else
+        echo "[$(stamp)] quality-check end (exit $QC_RC)" >>"$LOG"
+    fi
 fi
 
 # vectordb is now incremental (content-hash based) — always run it,

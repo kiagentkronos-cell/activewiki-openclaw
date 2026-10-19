@@ -157,12 +157,12 @@ The nightly pipeline runs two LLM roles — **build** (distillation in `distill.
 
 ## Pipeline
 
-`run_inbox.sh` is the master pipeline for the nightly run. Each phase is deadline-aware (default 03:00) and logged to `logs/ingest-<date>.log`:
+`run_inbox.sh` is the master pipeline for the nightly run. Each phase is deadline-aware (default 03:00) and logged to `logs/ingest-<date>.log`. To schedule it, use `scripts/launch_nightly.sh` instead of a bare `nohup setsid bash scripts/run_inbox.sh` from a cron/agent session: child process trees can be reaped when the launching session's turn ends, killing the run mid-phase. The launcher starts the pipeline as an independent systemd **user** oneshot unit (`activewiki-nightly-<YYYY-MM-DD>`, repo root script-relative, override `ACTIVEWIKI_ROOT`), with a legacy nohup fallback where systemd-run is unavailable:
 
 1. **Ingest** (`ingest.py`) — OCR new inbox documents into `sources/` (Docling; PDF, images, DOCX)
 2. **Distill** (`distill.py`) — generate/update hierarchical wiki pages from sources + bottom-up rollup of the folder hierarchy
 3. **Auto-commit** — uncommitted build changes are committed so the repo is clean for QC commits
-4. **Quality Check** (`check.py --oldest 2`) — nightly fact-verification of the 2 oldest leaf pages vs. their sources (see Quality Check above). Only runs when the inbox is empty and before 02:30, i.e. *after* distill and *before* vectordb — patches are indexed in the same night run
+4. **Quality Check** (`check.py --oldest 2`) — nightly fact-verification of the 2 oldest leaf pages vs. their sources (see Quality Check above). Only runs when the inbox is empty and before 02:30, i.e. *after* distill and *before* vectordb — patches are indexed in the same night run. Hard phase timeout: `timeout -k 10 900` — a hung QC is killed after 900 s (exit 124, logged distinctly) and the run continues
 5. **Vectordb** (`vectordb.py build --graph-incremental --communities --communities-incremental`) — always runs (content-hash-based incremental), even past the deadline
 6. **Graph HTML** (`vectordb.py graph html --all --mode <2d|3d|both>`) — renders the full interactive graph as a single HTML file (viewer mode from `graph.html_mode`, default `3d`), atomically published to `output/graph_latest.html` (temp file + `mv`). Budget-gated (`ingest.budget_seconds`), hard-capped by `graph-html.timeout_seconds` (default 1200s), fail-safe: a failure here never aborts the nightly run
 
@@ -184,7 +184,7 @@ mkdir -p serve && ln -sfn ../output/graph_latest.html serve/graph_latest.html
 
 You install ActiveWiki into an agent that holds read access to your knowledge base, so treat the install path like any other supply chain:
 
-- **Pin the exact version.** Install `@kiagentkronos-cell/activewiki@1.1.8`, never `latest`. Update channels are an attack vector — a compromised release lands in every unpinned install at once. Check the published version (and its provenance) before each bump.
+- **Pin the exact version.** Install `@kiagentkronos-cell/activewiki@1.1.9`, never `latest`. Update channels are an attack vector — a compromised release lands in every unpinned install at once. Check the published version (and its provenance) before each bump.
 - **Allowlist plugins.** In `openclaw.json`, keep an explicit `plugins.allow` list so only reviewed plugins load — a stray or renamed package in the plugins directory then stays inert.
 - **Review before linking.** `openclaw plugins install --link .` points at a working tree: review `git log`/`git diff` of that checkout first, and re-review before every `git pull` there.
 - **Health-check after updates.** `python3 scripts/vectordb.py status` confirms database integrity and endpoint reachability after any upgrade.
