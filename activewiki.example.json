@@ -34,7 +34,7 @@
     "url": "http://127.0.0.1:8000/v1",
     "temperature": 0.7,
     "max_tokens": 4096,
-    "_comment": "LLM for distillation (wiki page generation from raw documents). 'url' is the OpenAI-compatible endpoint."
+    "_comment": "LLM for distillation (wiki page generation from raw documents). 'url' is the OpenAI-compatible endpoint. Optional per-role overrides: 'build_model' (model for distill.py; fallback llm.model) and 'build_thinking' (true/false, default false = thinking off). Reasoning output counts against max_tokens when thinking is on — keep the build budget large enough. Env ACTIVEWIKI_MODEL overrides the build role only."
   },
 
   "graph": {
@@ -65,6 +65,6 @@
   "quality_check": {
     "timeout_seconds": 600,
     "max_tokens": 4096,
-    "_comment": "LLM timeout per call in the nightly quality check (scripts/check.py). Env ACTIVEWIKI_CHECK_TIMEOUT overrides this value; script default without config key is 120s. Retry logic unchanged: one retry after ~10s pause on timeout. max_tokens per LLM call: Env ACTIVEWIKI_CHECK_MAX_TOKENS overrides this value; script default without config key is 4096, hard cap 32768 (protects the vLLM context window). Increase when reports say 'abgeschnitten (max_tokens zu klein?)'."
+    "_comment": "LLM timeout per call in the nightly quality check (scripts/check.py). Env ACTIVEWIKI_CHECK_TIMEOUT overrides this value; script default without config key is 120s. Retry logic unchanged: one retry after ~10s pause on timeout. max_tokens per LLM call: Env ACTIVEWIKI_CHECK_MAX_TOKENS overrides this value; script default without config key is 4096, hard cap 32768 (protects the vLLM context window). Increase when reports say 'abgeschnitten (max_tokens zu klein?)'. Optional per-role keys: 'model' (QC model; fallback llm.model) and 'thinking' (true/false, default false). Unlike the build role, QC has no env override hook. When enabling thinking, raise max_tokens well above the bare-JSON answer need (reasoning counts against the budget)."
   }
 }

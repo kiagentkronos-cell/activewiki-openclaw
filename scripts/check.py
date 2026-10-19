@@ -702,14 +702,25 @@ def default_llm_call(system: str, user: str) -> str:
     KEIN Retry gemacht — der Fehler wird sofort (mit EINEM Präfix) als
     RuntimeError nach oben gereicht.
 
-    Config: llm.model + llm.temperature + quality_check.timeout_seconds
+    Config: quality_check.model (Fallback llm.model) + llm.temperature +
+    quality_check.timeout_seconds + quality_check.thinking (Default False)
     aus activewiki.json.
+
+    Thinking-Hinweis: bei thinking=true zählt die Denk-Ausgabe gegen
+    max_tokens (reasoning_tokens in usage) — bei aktiviertem
+    quality_check.thinking sollte quality_check.max_tokens deutlich höher als
+    der reine JSON-Antwortbedarf gesetzt werden, sonst droht
+    finish_reason=length mit content=None. content=None → ValueError →
+    bestehende Fehlerbehandlung (kein Retry außer Timeout), erfindet nichts.
+    Der JSON-Parser (parse_llm_answer) toleriert Denk-Präfixe vor dem
+    JSON-Objekt, da er den ersten balancierten {...}-Block scannt.
     """
-    from config import load_config, llm_model, llm_temperature
+    from config import load_config, llm_temperature, qc_model, qc_thinking
     cfg = load_config()
-    model = llm_model(cfg)
+    model = qc_model(cfg)
     temperature = llm_temperature(cfg)
     timeout = resolve_llm_timeout()
+    thinking = qc_thinking(cfg)
     payload = {
         "model": model,
         "temperature": temperature,
@@ -718,7 +729,7 @@ def default_llm_call(system: str, user: str) -> str:
             {"role": "user", "content": user},
         ],
         "max_tokens": resolve_max_tokens(),
-        "chat_template_kwargs": {"enable_thinking": False},
+        "chat_template_kwargs": {"enable_thinking": thinking},
     }
     last_error: Exception | None = None
     for attempt in (1, 2):  # Initial + max. 1 Retry (nur bei Timeout)
@@ -845,10 +856,11 @@ def llm_prose_check(system: str, user: str,
 
 
 def _llm_model_name() -> str:
-    """Modellname aus der Config (für das Report-Feld), ohne Crash."""
+    """Modellname aus der Config (für das Report-Feld), ohne Crash.
+    Quality-Check-Rolle: quality_check.model → llm.model (qc_model)."""
     try:
-        from config import load_config, llm_model
-        return llm_model(load_config())
+        from config import load_config, qc_model
+        return qc_model(load_config())
     except Exception:
         return "unknown"
 

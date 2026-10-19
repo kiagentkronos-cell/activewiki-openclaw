@@ -5,6 +5,22 @@ All notable changes to the ActiveWiki project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.8] - 2026-10-19
+
+### Added
+- **Per-role model selection** — the build role (`distill.py`) and the
+  quality check (`check.py`) can each run on their own model with their own
+  thinking switch: `llm.build_model`/`llm.build_thinking` and
+  `quality_check.model`/`quality_check.thinking`. Fallback chains
+  (`build_model`/`quality_check.model` → `llm.model`, thinking default
+  `false`) reproduce the previous behaviour exactly when the new keys are
+  absent. Type-robust coercion (garbage value → default + stderr warning,
+  never a crash). `ACTIVEWIKI_MODEL` still overrides the build role only;
+  the QC path deliberately has no env hook. Documented in README
+  ("Per-Role Model Selection") and in `activewiki.example.json` comments;
+  new `scripts/test_role_models.py` (22 tests) covers the fallback chains,
+  thinking defaults, payload wiring, and distill.py accessor wiring.
+
 ## [1.1.7] - 2026-09-13
 
 ### Added

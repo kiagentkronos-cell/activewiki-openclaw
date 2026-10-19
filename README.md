@@ -131,6 +131,20 @@ scripts/check.py --page wiki/<scope>/<slug>.md # single page (check + auto-patch
 scripts/check.py --all --since-days 7 --limit 20  # read-only (check only, no patches)
 ```
 
+### Per-Role Model Selection
+The nightly pipeline runs two LLM roles — **build** (distillation in `distill.py`) and **quality check** (verification in `check.py`). Since v1.1.8 each role can use its own model and thinking switch; every key is optional and its absence reproduces the pre-v1.1.8 behaviour exactly (all roles on `llm.model`, thinking off):
+
+| Role | Model key | Thinking key | Fallback |
+|---|---|---|---|
+| Build (`distill.py`) | `llm.build_model` | `llm.build_thinking` | model → `llm.model`; thinking default `false` |
+| Quality check (`check.py`) | `quality_check.model` | `quality_check.thinking` | model → `llm.model`; thinking default `false` |
+
+- `llm.model` stays the mandatory default for all roles (and for vectordb/graph).
+- QC keys live in the existing `quality_check` section (alongside `timeout_seconds`/`max_tokens`); build keys extend the `llm` object (build is the default llm role).
+- Type robustness: a garbage value (wrong type, unparsable string) falls back to the default with a stderr warning — a broken switch never crashes the nightly run.
+- **thinking=true caveat:** reasoning output counts against `max_tokens` (`usage.completion_tokens_details.reasoning_tokens`). With `finish_reason=length` the API can return `content=None` (the thinking text sits in a separate `reasoning` field) — the existing error/retry path handles it without inventing text. Raise `quality_check.max_tokens` well above the bare-JSON need before enabling QC thinking.
+- Env override: `ACTIVEWIKI_MODEL` overrides the **build role only** (`llm.model` and `llm.build_model`); `check.py`/`qc_model` deliberately has no env hook.
+
 ### Temporal Filtering
 - **Time-bound relationship queries** — `--since YYYY-MM-DD` and `--until YYYY-MM-DD` filter relationships by validity period
 - **NULL-safe semantics** — timeless relationships (no date) always pass filters
@@ -170,7 +184,7 @@ mkdir -p serve && ln -sfn ../output/graph_latest.html serve/graph_latest.html
 
 You install ActiveWiki into an agent that holds read access to your knowledge base, so treat the install path like any other supply chain:
 
-- **Pin the exact version.** Install `@kiagentkronos-cell/activewiki@1.1.7`, never `latest`. Update channels are an attack vector — a compromised release lands in every unpinned install at once. Check the published version (and its provenance) before each bump.
+- **Pin the exact version.** Install `@kiagentkronos-cell/activewiki@1.1.8`, never `latest`. Update channels are an attack vector — a compromised release lands in every unpinned install at once. Check the published version (and its provenance) before each bump.
 - **Allowlist plugins.** In `openclaw.json`, keep an explicit `plugins.allow` list so only reviewed plugins load — a stray or renamed package in the plugins directory then stays inert.
 - **Review before linking.** `openclaw plugins install --link .` points at a working tree: review `git log`/`git diff` of that checkout first, and re-review before every `git pull` there.
 - **Health-check after updates.** `python3 scripts/vectordb.py status` confirms database integrity and endpoint reachability after any upgrade.

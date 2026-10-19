@@ -155,6 +155,87 @@ def llm_model(config: dict[str, Any]) -> str:
     return model
 
 
+def _coerce_bool(raw_val: Any, key: str, default: bool = False) -> bool:
+    """Config value → bool, type-robust without crashing (pattern: _coerce_max_tokens).
+
+    bool → returned directly; int 0/1 → bool; strings 'true'/'false'/'1'/'0'
+    (case-insensitive, leading/trailing whitespace ignored) → matching bool.
+    Anything else (None, list, garbage string) → default + warning on stderr:
+    a broken switch must never crash the nightly run — it may only land
+    silently on the safe default (thinking off).
+    """
+    if isinstance(raw_val, bool):
+        return raw_val
+    if isinstance(raw_val, int) and not isinstance(raw_val, bool):
+        if raw_val in (0, 1):
+            return bool(raw_val)
+    if isinstance(raw_val, str):
+        v = raw_val.strip().lower()
+        if v in ("true", "1", "yes", "on"):
+            return True
+        if v in ("false", "0", "no", "off"):
+            return False
+    print(f"[config] WARNING {key}: invalid bool value {raw_val!r} — "
+          f"default {default} applies.", file=sys.stderr)
+    return default
+
+
+def resolve_role_model(config: dict[str, Any], role_key: str) -> str:
+    """Model for one pipeline role — fallback chain: role key → llm.model.
+
+    role_key is the key inside the llm object (e.g. 'build_model'). Missing,
+    empty or non-string value → silently falls back to llm.model (the old
+    behaviour). llm.model itself stays mandatory (FATAL as in llm_model()):
+    no role key + no llm.model = configuration error, no model fallback in
+    code (config requirement since 2026-08-17).
+    """
+    role_model = get(config, f"llm.{role_key}")
+    if isinstance(role_model, str) and role_model.strip():
+        return role_model.strip()
+    if role_model is not None and not isinstance(role_model, str):
+        print(f"[config] WARNING llm.{role_key}: not a string ({role_model!r}) — "
+              f"falling back to llm.model.", file=sys.stderr)
+    return llm_model(config)
+
+
+def build_model(config: dict[str, Any]) -> str:
+    """Model for the build role (distill.py): llm.build_model → llm.model."""
+    return resolve_role_model(config, "build_model")
+
+
+def build_thinking(config: dict[str, Any]) -> bool:
+    """Thinking switch for the build role: llm.build_thinking, default False
+    (behaviour with the key missing stays exactly as before)."""
+    raw = get(config, "llm.build_thinking")
+    return _coerce_bool(raw, "llm.build_thinking", False) if raw is not None else False
+
+
+def qc_model(config: dict[str, Any]) -> str:
+    """Model for the quality-check role (check.py).
+
+    Naming decision (2026-10-18): the QC key lives in the existing top-level
+    quality_check section (analogous to timeout_seconds/max_tokens — role
+    parameters belong together, model analogy like embeddings.model), NOT in
+    the llm object like build_model (build is the default llm role, its key
+    extends llm directly).
+    Fallback: quality_check.model → llm.model (old behaviour).
+    """
+    role_model = get(config, "quality_check.model")
+    if isinstance(role_model, str) and role_model.strip():
+        return role_model.strip()
+    if role_model is not None and not isinstance(role_model, str):
+        print(f"[config] WARNING quality_check.model: not a string "
+              f"({role_model!r}) — falling back to llm.model.", file=sys.stderr)
+    return llm_model(config)
+
+
+def qc_thinking(config: dict[str, Any]) -> bool:
+    """Thinking switch for the quality check: quality_check.thinking, default
+    False (old behaviour thinking=false when the key is missing)."""
+    raw = get(config, "quality_check.thinking")
+    return _coerce_bool(raw, "quality_check.thinking", False) if raw is not None else False
+
+
 def llm_url(config: dict[str, Any]) -> str:
     """Return LLM API URL (OpenAI-compatible endpoint)."""
     return get(config, "llm.url", "http://127.0.0.1:8000/v1").rstrip("/")

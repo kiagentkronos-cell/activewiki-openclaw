@@ -47,7 +47,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (
     load_config, get,
     wikis_root, scopes,
-    llm_model, llm_url, llm_temperature, llm_max_tokens,
+    llm_url, llm_temperature, llm_max_tokens,
+    build_model, build_thinking,
 )
 
 _CONFIG = load_config()
@@ -64,7 +65,17 @@ WIKI = _WIKIS_ROOT / "wiki"
 INBOX = _WIKIS_ROOT / "inbox"
 
 # ── LLM Config (from activewiki.json, overridable via env) ──────────────────
-MODEL = os.environ.get("ACTIVEWIKI_MODEL", llm_model(_CONFIG))
+# Build role: llm.build_model → llm.model (fallback chain in config.py).
+# Env ACTIVEWIKI_MODEL still overrides the build role (test/emergency path).
+# check.py/qc_model deliberately has no env hook.
+MODEL = os.environ.get("ACTIVEWIKI_MODEL", build_model(_CONFIG))
+# Thinking switch from config (llm.build_thinking, default False = old
+# behaviour). NOTE: with thinking=true the reasoning output counts against
+# the max_tokens budget (reasoning_tokens in usage.completion_tokens_details;
+# content=None possible when finish_reason=length). max_tokens stays hard at
+# 65536 (payload below) — sized large enough for build prompts with a
+# thinking pass; when content=None the existing retry chain applies.
+BUILD_THINKING = build_thinking(_CONFIG)
 LLM_BASE_URL = os.environ.get("OLLAMA_URL", llm_url(_CONFIG))
 HTTP_TIMEOUT = int(os.environ.get("ACTIVEWIKI_HTTP_TIMEOUT", "3600"))
 
@@ -1232,7 +1243,7 @@ def call_llm(
                 "temperature": llm_temperature(_CONFIG),
                 "max_tokens": 65536,
                 "response_format": json_schema_override or _SCHEMA_DISTILL_PAGE,
-                "chat_template_kwargs": {"enable_thinking": False},
+                "chat_template_kwargs": {"enable_thinking": BUILD_THINKING},
             }
             req = urllib.request.Request(
                 f"{LLM_BASE_URL}/chat/completions",
