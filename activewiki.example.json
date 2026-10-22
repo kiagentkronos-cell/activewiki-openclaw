@@ -42,7 +42,8 @@
     "communities_enabled": true,
     "communities_incremental_threshold": 5,
     "html_mode": "3d",
-    "_comment": "KG: incremental saves time on daily runs. Communities rebuild only when >threshold new entities. html_mode: graph HTML viewer \"2d\" | \"3d\" | \"both\" (default \"3d\"; CLI --mode overrides; both = one file with a 2D|3D toggle)."
+    "dedup_top_k": 50,
+    "_comment": "KG: incremental saves time on daily runs. Communities rebuild only when >threshold new entities. html_mode: graph HTML viewer \"2d\" | \"3d\" | \"both\" (default \"3d\"; CLI --mode overrides; both = one file with a 2D|3D toggle). dedup_top_k: max candidates fully scored in entity dedup (Priority 4/5) after the upper-bound prefilter; threshold-capable candidates are always passed regardless of K (default 50)."
   },
 
   "distill": {

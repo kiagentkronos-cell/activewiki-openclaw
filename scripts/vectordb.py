@@ -49,7 +49,7 @@ from config import (
     ollama_url, embed_model, embed_dims, db_path,
     llm_model, llm_url, llm_temperature, llm_max_tokens,
     graph_incremental, graph_communities_enabled, graph_communities_threshold,
-    graph_html_mode,
+    graph_html_mode, graph_dedup_top_k,
 )
 
 _CONFIG = load_config(_config_path)
@@ -135,6 +135,22 @@ RETRY_MAX = 3
 RETRY_BASE = 1.0
 RATE_LIMIT_S = 0.5
 FUZZY_THRESHOLD = 85
+
+# ── Dedup-Kandidaten-Limit (config: graph.dedup_top_k, Default 50) ──
+# Obergrenze fuer die Kandidaten, die in resolve_entity() Priority 4/5
+# vollstaendig gescort werden. Vorfilter ist eine harte obere Schranke
+# (siehe _rank_fuzzy_candidates): jeder Kandidat, der den FUZZY-Threshold
+# wirklich erreicht, hat immer Rang >= Threshold und faellt NIE unter den
+# Tisch, solange nicht mehr als K Kandidaten ueber dem Rang-Threshold
+# liegen (dann Warnlog). Grundwert 50: reale Fuzzy-Bestscores standen im
+# Benchmark immer in den Top ~20; 50 ist die Sicherheitsmarge.
+# Aequivalenz bei K=50 und K=20 ueber mehrere reale Seiten verifiziert.
+try:
+    DEDUP_TOP_K = max(1, int(os.environ.get(
+        "ACTIVEWIKI_GRAPH_DEDUP_TOP_K", str(graph_dedup_top_k(_CONFIG))
+    )))
+except (TypeError, ValueError):
+    DEDUP_TOP_K = graph_dedup_top_k(_CONFIG)
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
 H2_SPLIT_RE = re.compile(r"(?=^##\s)", re.MULTILINE)
@@ -385,12 +401,24 @@ RELATION_TYPES = [
 
 # ── Timestamped Logging ─────────────────────────────────────────────────────
 
+# Debug-Level-Logs (level="debug") werden nur ausgegeben, wenn
+# ACTIVEWIKI_LOG_DEBUG=1 gesetzt ist. Hintergrund: die dedup-skip-Zeilen
+# (Adress-Guard) produzierten mehrere hundert Log-Zeilen pro Seite — bei
+# vielen Seiten erheblicher I/O-Overhead ohne Informationswert im
+# Normalbetrieb.
+_DEBUG_LOG = os.environ.get("ACTIVEWIKI_LOG_DEBUG", "") in ("1", "true", "yes")
+
+
 def log(level: str, message: str, *, stderr: bool = False) -> None:
     """Print a log line with ISO-8601 Berlin timestamp.
 
     All output goes to stdout (stderr param kept for API compatibility
     but ignored) to avoid stream interleaving in the log file.
+
+    level="debug" is suppressed unless ACTIVEWIKI_LOG_DEBUG=1.
     """
+    if level == "debug" and not _DEBUG_LOG:
+        return
     from zoneinfo import ZoneInfo
     ts = datetime.datetime.now(ZoneInfo("Europe/Berlin")).strftime("%Y-%m-%dT%H:%M:%S %Z")
     # Force single-line: collapse newlines to prevent multi-line log entries
@@ -1445,8 +1473,53 @@ def _extract_address(label: str) -> tuple[str, str] | None:
     return None
 
 
-def _normalize_label_for_jaccard(label: str) -> set[str]:
-    """Normalize a label for Jaccard comparison: lowercase, remove stopwords, split into tokens."""
+# ── Dedup-Caches (pro Prozess; reine Label-Funktionen, deterministisch) ──
+# Token-Sets fuer Jaccard/Label-Normalisierung — wurde pro Paar-Aufruf
+# neu berechnet; die gleichen bestehenden Labels werden im Seiten-Build
+# tausendfach evaluated.
+_JACCARD_TOKENS_CACHE: dict[str, frozenset] = {}
+# Whitespace-Tokens fuer den Dedup-Prefilter (exakter Term-Wert, gecacht).
+_RAW_TOKENS_CACHE: dict[str, frozenset] = {}
+# Paar-Raender fuer den Dedup-Prefilter (siehe _fuzzy_candidate_rank).
+_FUZZY_RANK_CACHE: dict[tuple, int] = {}
+# Globale Label→Embedding-Cache: process_page ruft resolve_entity ohne
+# _embed_cache auf, dadurch re-embeddete _resolve_by_embedding bisher pro
+# Entity ALLE Labels desselben Typs erneut (Haupt-Hotspot des Dedups).
+# Ein Prozess-weiter Cache erhaelt die Semantik exakt (Embeddings sind
+# deterministisch), laedt jedes Label aber nur noch einmal.
+_EMBED_CACHE_GLOBAL: dict[str, "np.ndarray"] | None = None
+
+# Cache-Groessenlimits: Labels und Token-Sets bleiben klein; die
+# Paar-Rank-Cache kann bei langen Builds (viele Seiten x viele Entities)
+# stark anwachsen. Deshalb Kappung: bei Ueberlauf wird der Cache geleert
+# (nicht veraltet geloescht) — alle gecachten Funktionen sind reine
+# Label-Funktionen, Verwerfung aendert NIE Ergebnisse.
+_RANK_CACHE_MAX = 2_000_000
+_TOKENS_CACHE_MAX = 500_000
+
+
+def _rank_cache_put(key: tuple, value: int) -> None:
+    if len(_FUZZY_RANK_CACHE) >= _RANK_CACHE_MAX:
+        _FUZZY_RANK_CACHE.clear()
+    _FUZZY_RANK_CACHE[key] = value
+
+
+def _tokens_cache_put(cache: dict, label: str, value: frozenset) -> None:
+    if len(cache) >= _TOKENS_CACHE_MAX:
+        cache.clear()
+    cache[label] = value
+
+
+def _normalize_label_for_jaccard(label: str) -> frozenset[str]:
+    """Normalize a label for Jaccard comparison: lowercase, remove stopwords, split into tokens.
+
+    Result is cached per label (frozenset, never mutated by callers) — the
+    function is a pure function of the label, and the incremental build
+    evaluates the same existing labels thousands of times.
+    """
+    cached = _JACCARD_TOKENS_CACHE.get(label)
+    if cached is not None:
+        return cached
     # Normalize umlauts and abbreviations
     normalized = label.lower()
     normalized = normalized.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
@@ -1458,8 +1531,9 @@ def _normalize_label_for_jaccard(label: str) -> set[str]:
     # Tokenize: split on whitespace, punctuation, and special chars
     tokens = re.findall(r"[a-zA-ZäöüÄÖÜß0-9]+", normalized)
     # Remove stopwords and very short tokens
-    tokens = {t for t in tokens if t not in _STOPWORDS_JACCARD and len(t) > 1}
-    return tokens
+    result = frozenset(t for t in tokens if t not in _STOPWORDS_JACCARD and len(t) > 1)
+    _tokens_cache_put(_JACCARD_TOKENS_CACHE, label, result)
+    return result
 
 
 def _jaccard_similarity(a: str, b: str) -> float:
@@ -1867,6 +1941,96 @@ def deduplicate_entities(
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _fuzzy_candidate_rank(a: str, b: str) -> int:
+    """Harte obere Schranke (Upper Bound) fuer _fuzzy_match_score(a, b), in Prozent.
+
+    _fuzzy_match_score = max(token_set_overlap, levenshtein_ratio). Beide
+    Terme werden exakt bzw. gueltig nach oben beschraenkt:
+      * token_set_overlap wird HIER EXAKT berechnet (gecachte lower()-
+        Whitespace-Token-Sets — dieselbe Menge wie in _token_set_overlap).
+      * levenshtein_ratio = 1 - dist/max_len und dist >= |len(a)-len(b)|
+        => ratio <= 1 - |len(a)-len(b)|/max(len(a),len(b)). (Der
+        Frueh-Exit |la-lb|>20 -> 0 ist damit konsistent abgedeckt.)
+
+    Kern-Eigenschaft: Erreicht ein Kandidat den FUZZY_THRESHOLD mit dem
+    echten Score, liegt sein Rank immer >= Threshold — ein Threshold-
+    Match kann durch das Top-K-Ranking nie verlieren. int() schaedet
+    nicht: der echte Score ist selbst ganzzahlig (int() der Terme), ein
+    Score von z.B. 85 liefert eine Bound >= 85 vor dem int().
+    Reine Label-Funktion, paarweise gecacht.
+    """
+    key = (a, b) if a <= b else (b, a)
+    cached = _FUZZY_RANK_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if a == b:
+        # _levenshtein_ratio Frueh-Exit: identische Strings -> 100
+        # (inkl. beider leer — der Fall la=lb=0 waere sonst 0)
+        _rank_cache_put(key, 100)
+        return 100
+    sa = _RAW_TOKENS_CACHE.get(a)
+    if sa is None:
+        sa = frozenset(a.lower().split())
+        _tokens_cache_put(_RAW_TOKENS_CACHE, a, sa)
+    sb = _RAW_TOKENS_CACHE.get(b)
+    if sb is None:
+        sb = frozenset(b.lower().split())
+        _tokens_cache_put(_RAW_TOKENS_CACHE, b, sb)
+    if sa and sb:
+        tok = len(sa & sb) / len(sa | sb) * 100.0
+    else:
+        tok = 0.0
+    la, lb = len(a), len(b)
+    if la and lb:
+        # dist >= |la-lb| => ratio <= 1 - |la-lb|/max_len. Der Frueh-Exit
+        # in _levenshtein_ratio (|la-lb| > 20 -> 0) wird exakt
+        # nachgebildet, sonst wuerde die Bound ueberschaetzt und zu viele
+        # Kandidaten in die threshold-faehige Gruppe rutschen (Warnlog).
+        if abs(la - lb) > 20:
+            lev_bound = 0.0
+        else:
+            lev_bound = (1.0 - abs(la - lb) / max(la, lb)) * 100.0
+    else:
+        lev_bound = 0.0
+    rank = int(max(tok, lev_bound))
+    _rank_cache_put(key, rank)
+    return rank
+
+
+def _rank_fuzzy_candidates(label: str, cand_labels: list[str], top_k: int,
+                           threshold: int):
+    """Prefilter fuer Priority 4/5: Kandidaten, die den Threshold noch
+    erreichen koennen, in moeglicher Anzahl auf top_k begrenzen.
+
+    Ergebnis = (subset, might_have_missed):
+      * Kandidaten mit Rank >= threshold werden IMMER durchgereicht
+        (garantiert threshold-faehig, siehe _fuzzy_candidate_rank), auch
+        wenn es mehr als top_k sind — Top-K kann keinen echten Merge
+        verlieren; in diesem Grenzfall wird stattdessen gewarnt.
+      * Restliche Kandidaten (Rank > 0, Rank < threshold) koennen den
+        Threshold nicht erreichen und zaehlen nur fuer die
+        Best-Score-Bestimmung (Log-Ausgabe); sie werden nach Rank
+        absteigend (Gleichstand: DB-Reihenfolge, stabil) aufgefuellt,
+        bis top_k erreicht ist.
+      * subset ist wieder in DB-Reihenfolge -> deterministische Iteration,
+        'first best wins' (strict >) bleibt bitgenau identisch.
+    """
+    above = []   # idx, Rank >= threshold — immer drin
+    below = []   # (rank, idx) — nach Rank sortiert
+    for i, cl in enumerate(cand_labels):
+        r = _fuzzy_candidate_rank(label, cl)
+        if r >= threshold:
+            above.append(i)
+        elif r > 0:
+            below.append((r, i))
+    below.sort(key=lambda t: -t[0])
+    budget = max(0, top_k - len(above))
+    subset = above + [i for _, i in below[:budget]]
+    subset.sort()  # DB-Reihenfolge wiederherstellen → deterministische Iteration
+    might_have_missed = len(above) > top_k
+    return subset, might_have_missed
+
+
 def _resolve_by_embedding(
     conn: sqlite3.Connection,
     label: str,
@@ -1915,8 +2079,18 @@ def _resolve_by_embedding(
         return None
 
     # ── Stage 1: Embedding-based matching ────────────────────────────
+    # Embedding-Cache-Auswahl: expliziter _cache (API-kompatibel) >
+    # globaler Prozess-Cache. Der globale Cache wurde bisher NIE verwendet,
+    # weil process_page() resolve_entity ohne _embed_cache aufruft — Folge:
+    # pro neuer Entity wurden ALLE gleichtypigen Label neu eingebettet
+    # (Haupt-Hotspot des Dedups). Embeddings sind deterministisch; ein
+    # Label wird pro Prozess nur noch einmal eingebettet, die
+    # Vergleichs-Vektoren sind identisch.
     if _cache is None:
-        _cache = {}
+        global _EMBED_CACHE_GLOBAL
+        if _EMBED_CACHE_GLOBAL is None:
+            _EMBED_CACHE_GLOBAL = {}
+        _cache = _EMBED_CACHE_GLOBAL
     existing_labels = [e_label for _, e_label in candidates]
     missing_labels = [l for l in existing_labels if l not in _cache]
 
@@ -2329,18 +2503,35 @@ def resolve_entity(
             return eid
 
     # ── Priority 4: Fuzzy match within same entity_type ──────────
+    # Speedup: der Vollscan O(neu × alle) wurde durch einen Prefilter mit
+    # harter Upper-Bound-Schranke ersetzt (siehe _rank_fuzzy_candidates):
+    # nur Top-K-Kandidaten (K = DEDUP_TOP_K, config graph.dedup_top_k)
+    # werden voll gescort; alle Kandidaten, die den Threshold theoretisch
+    # erreichen KÖNNEN, werden garantiert durchgereicht. Merge-Ergebnis
+    # damit identisch zum Vollscan.
     candidates = conn.execute(
         "SELECT id, label, description FROM entities WHERE entity_type = ?",
         (entity_type,),
     ).fetchall()
+    guard_types = entity_type in ("PROPERTY", "LOCATION")
+    subset, overflow = _rank_fuzzy_candidates(
+        label, [c[1] for c in candidates], DEDUP_TOP_K, FUZZY_THRESHOLD
+    )
+    if overflow:
+        log("warn",
+            f"  [dedup-topk] '{label}': mehr als {DEDUP_TOP_K} "
+            f"threshold-faehige Kandidaten — alle werden geprueft "
+            f"(kein Merge-Verlust)", stderr=True)
     best_score = 0
     best_eid = None
     best_desc = None
-    for cid, c_label, c_desc in candidates:
-        # Address guard: if both are PROPERTY/LOCATION with different street numbers,
-        # skip this candidate to avoid merging different addresses
-        if entity_type in ("PROPERTY", "LOCATION") and _addresses_differ(label, c_label):
-            log("dedup", f"  [dedup-skip] '{label}' vs '{c_label}' — different street numbers")
+    for idx in subset:
+        cid, c_label, c_desc = candidates[idx]
+        # Address guard: if both are PROPERTY/LOCATION with different street
+        # numbers, skip this candidate to avoid merging different addresses.
+        # debug-Level: mehrere hundert Zeilen/Seite im Normalbetrieb ohne Wert.
+        if guard_types and _addresses_differ(label, c_label):
+            log("debug", f"  [dedup-skip] '{label}' vs '{c_label}' — different street numbers")
             continue
         score = _fuzzy_match_score(label, c_label)
         if score > best_score:
@@ -2358,19 +2549,29 @@ def resolve_entity(
         return best_eid
 
     # ── Priority 5: Cross-type fuzzy match (threshold 90%) ───────
+    # Wie Priority 4 mit Prefilter; Threshold hier 90 (CROSS_TYPE).
     all_entities = conn.execute(
         "SELECT id, label, entity_type, description FROM entities"
     ).fetchall()
+    subset5, overflow5 = _rank_fuzzy_candidates(
+        label, [e[1] for e in all_entities], DEDUP_TOP_K, CROSS_TYPE_FUZZY_THRESHOLD
+    )
+    if overflow5:
+        log("warn",
+            f"  [dedup-topk] '{label}' (cross-type): mehr als "
+            f"{DEDUP_TOP_K} threshold-faehige Kandidaten — alle werden geprueft",
+            stderr=True)
     cross_best_score = 0
     cross_best_id = None
     cross_best_label = None
     cross_best_type = None
     cross_best_desc = None
-    for eid, e_label, e_type, e_desc in all_entities:
+    for idx in subset5:
+        eid, e_label, e_type, e_desc = all_entities[idx]
         if e_type == entity_type:
             continue  # already checked in Priority 4
-        # Address guard: if both are PROPERTY/LOCATION with different street numbers,
-        # skip this candidate to avoid merging different addresses
+        # Address guard: if both are PROPERTY/LOCATION with different street
+        # numbers, skip this candidate to avoid merging different addresses
         if entity_type in ("PROPERTY", "LOCATION") and _addresses_differ(label, e_label):
             continue
         score = _fuzzy_match_score(label, e_label)

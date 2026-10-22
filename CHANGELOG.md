@@ -5,6 +5,51 @@ All notable changes to the ActiveWiki project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.10] - 2026-10-22
+
+### Added
+- **`graph.dedup_top_k`** (default `50`) — Top-K prefilter for entity dedup
+  during the page build (`resolve_entity`, Priority 4/5). The full fuzzy scan
+  over all same-type (and cross-type) candidates is replaced by an
+  upper-bound ranking: a hard upper bound per candidate
+  (`_fuzzy_candidate_rank`: exact cached token-set Jaccard plus the
+  length-difference Levenshtein bound) decides which candidates could
+  theoretically reach the fuzzy threshold — those are *always* passed,
+  regardless of K (with a warn log if they exceed K, never a merge loss).
+  Only the remaining budget up to K candidates is fully scored. Merge
+  results are identical to the full scan (verified end-to-end in
+  `scripts/test_dedup_speedup.py`, equivalence at K = 50/5/1 against
+  full-scan runs). Env override: `ACTIVEWIKI_GRAPH_DEDUP_TOP_K`.
+- **Dedup caches with caps** (`scripts/vectordb.py`) — per-label token-set
+  caches for Jaccard normalization and the prefilter, a pair-rank cache,
+  and a process-wide label→embedding cache (previously the page build
+  re-embedded every same-type label per entity — the main dedup hotspot).
+  All cached functions are pure functions of the label, and the caches are
+  capped (`_RANK_CACHE_MAX` 2M / `_TOKENS_CACHE_MAX` 500k entries; on
+  overflow the cache is cleared, never evicted-by-age) — a discard can
+  never change results.
+
+### Changed
+- **`_normalize_label_for_jaccard`** returns a `frozenset` (cached; callers
+  only read it) — mutation-safe caching.
+- **`dedup-skip` address-guard log lines** moved to `log` level `debug`
+  (suppressed unless `ACTIVEWIKI_LOG_DEBUG=1`): they produced hundreds of
+  log lines per page with no value in normal operation.
+- **Config access** — `config.graph_dedup_top_k()` clamps values < 1 to 1
+  and falls back to the default on garbage input; the env-path parsing in
+  `vectordb.py` is tolerant (try/except around the env override).
+- Documentation: new config key in `activewiki.example.json` + README
+  (Entity resolution bullet), version pins to 1.1.10.
+
+### Tests
+- **`scripts/test_dedup_speedup.py`** (new, 22 tests, synthetic fixtures
+  only) — config helper, upper-bound rank invariant, Top-K prefilter
+  semantics (threshold guarantee, DB order, threshold switch 85/90),
+  token-cache correctness, end-to-end merge equivalence
+  prefilter-vs-full-scan on temp DBs, `idx_entities_type` presence,
+  debug-log suppression. The test bootstraps a temp config via
+  `ACTIVEWIKI_CONFIG` and runs without an installed `activewiki.json`.
+
 ## [1.1.9] - 2026-10-19
 
 ### Added

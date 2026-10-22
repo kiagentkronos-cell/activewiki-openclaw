@@ -261,6 +261,24 @@ def graph_communities_threshold(config: dict[str, Any]) -> int:
     return int(get(config, "graph.communities_incremental_threshold", 5))
 
 
+def graph_dedup_top_k(config: dict[str, Any]) -> int:
+    """Max. Anzahl Kandidaten für das Entity-Dedup (Priority 4/5) nach Prefilter.
+
+    Default 50: Beim Seiten-Build werden alle Kandidaten, die den
+    FUZZY-Threshold theoretisch erreichen können (harte obere Schranke),
+    nach dieser Schranke sortiert und nur die besten K vollständig gescorrt.
+    Der tatsächliche Fuzzy-Bestscore liegt real typisch in den Top ~20;
+    50 ist die Sicherheitsmarge. Werte < 1 werden auf 1 geklemmt (sonst
+    würde der gesamte Fuzzy-Teil übersprungen und das Merge-Ergebnis
+    geändert).
+    """
+    try:
+        val = int(get(config, "graph.dedup_top_k", 50))
+    except (TypeError, ValueError):
+        return 50
+    return max(1, val)
+
+
 def graph_html_mode(config: dict[str, Any]) -> str:
     """HTML-Viewer-Modus: "2d" | "3d" | "both" (Default "3d")."""
     mode = str(get(config, "graph.html_mode", "3d") or "3d").strip().lower()

@@ -106,7 +106,7 @@ See [`plugin/README.md`](plugin/README.md) for the full Prompt Evolution Pipelin
 - **Click-to-source** — every relationship stores the originating section header and source text snippet (max 200 chars), enabling traceability in the D3.js visualization
 - **Entity-chunk mapping** — N:M junction table (`entity_chunks`) tracks which document chunks produced each entity, with source text excerpts
 - **Discarded relations tracking** — relationships referencing unknown entities are stored in `discarded_relations` instead of creating stubs, preserving audit trail
-- **Entity resolution** — hybrid matching (embeddings + string similarity + Union-Find deduplication) with label-based cross-page lookup for robust entity identity
+- **Entity resolution** — hybrid matching (embeddings + string similarity + Union-Find deduplication) with label-based cross-page lookup for robust entity identity. Page-build dedup is Top-K-accelerated: an upper-bound prefilter guarantees every threshold-capable candidate is scored, only the best `graph.dedup_top_k` (default 50) remaining candidates go through the full fuzzy scorer — merge results are identical to the full scan
 - **Large section handling** — sections exceeding 15K chars are automatically split by `###` headings or paragraphs to stay within context limits
 
 ### Quality Check (Nightly Fact-Verification)
@@ -184,7 +184,7 @@ mkdir -p serve && ln -sfn ../output/graph_latest.html serve/graph_latest.html
 
 You install ActiveWiki into an agent that holds read access to your knowledge base, so treat the install path like any other supply chain:
 
-- **Pin the exact version.** Install `@kiagentkronos-cell/activewiki@1.1.9`, never `latest`. Update channels are an attack vector — a compromised release lands in every unpinned install at once. Check the published version (and its provenance) before each bump.
+- **Pin the exact version.** Install `@kiagentkronos-cell/activewiki@1.1.10`, never `latest`. Update channels are an attack vector — a compromised release lands in every unpinned install at once. Check the published version (and its provenance) before each bump.
 - **Allowlist plugins.** In `openclaw.json`, keep an explicit `plugins.allow` list so only reviewed plugins load — a stray or renamed package in the plugins directory then stays inert.
 - **Review before linking.** `openclaw plugins install --link .` points at a working tree: review `git log`/`git diff` of that checkout first, and re-review before every `git pull` there.
 - **Health-check after updates.** `python3 scripts/vectordb.py status` confirms database integrity and endpoint reachability after any upgrade.
